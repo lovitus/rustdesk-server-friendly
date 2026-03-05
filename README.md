@@ -66,6 +66,8 @@ rustdesk-friendly guide --target cross --topic migrate --output docs/windows-to-
 rustdesk-friendly gui
 ```
 
+If your Python build has no `tkinter` (common on minimal Linux/macOS builds), CLI still works and GUI will print a clear dependency message.
+
 ## Example output
 
 Generate a full Linux playbook:
