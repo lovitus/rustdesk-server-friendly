@@ -81,12 +81,16 @@ def run_wizard(default_output: Path | None = None) -> None:
         topic = "all"
         host = _prompt_text("Public host/IP used by hbbs -r", host)
 
-        if target == "linux":
-            linux_install_dir = _prompt_text("Linux install dir", linux_install_dir)
-            linux_data_dir = _prompt_text("Linux data dir", linux_data_dir)
-            linux_log_dir = _prompt_text("Linux log dir", linux_log_dir)
-        else:
-            windows_dir = _prompt_text("Windows root dir", windows_dir)
+        if not _prompt_yes_no(
+            "Auto-detect runtime paths from running services/processes (recommended)?",
+            default_yes=True,
+        ):
+            if target == "linux":
+                linux_install_dir = _prompt_text("Linux install dir (fallback)", linux_install_dir)
+                linux_data_dir = _prompt_text("Linux data dir (fallback)", linux_data_dir)
+                linux_log_dir = _prompt_text("Linux log dir (fallback)", linux_log_dir)
+            else:
+                windows_dir = _prompt_text("Windows root dir (fallback)", windows_dir)
 
     elif mode == "guided-migration":
         target = "cross"
@@ -94,23 +98,27 @@ def run_wizard(default_output: Path | None = None) -> None:
         migration_source_os = _prompt_choice("Migration source OS", SUPPORTED_MIGRATION_OS, "windows")
         migration_target_os = _prompt_choice("Migration target OS", SUPPORTED_MIGRATION_OS, "linux")
 
-        if migration_source_os == "linux":
-            migration_source_linux_data_dir = _prompt_text(
-                "Source Linux data dir", migration_source_linux_data_dir
-            )
-        else:
-            migration_source_windows_dir = _prompt_text(
-                "Source Windows root dir", migration_source_windows_dir
-            )
+        if not _prompt_yes_no(
+            "Auto-detect source/target data paths from running services (recommended)?",
+            default_yes=True,
+        ):
+            if migration_source_os == "linux":
+                migration_source_linux_data_dir = _prompt_text(
+                    "Source Linux data dir (fallback)", migration_source_linux_data_dir
+                )
+            else:
+                migration_source_windows_dir = _prompt_text(
+                    "Source Windows root dir (fallback)", migration_source_windows_dir
+                )
 
-        if migration_target_os == "linux":
-            migration_target_linux_data_dir = _prompt_text(
-                "Target Linux data dir", migration_target_linux_data_dir
-            )
-        else:
-            migration_target_windows_dir = _prompt_text(
-                "Target Windows root dir", migration_target_windows_dir
-            )
+            if migration_target_os == "linux":
+                migration_target_linux_data_dir = _prompt_text(
+                    "Target Linux data dir (fallback)", migration_target_linux_data_dir
+                )
+            else:
+                migration_target_windows_dir = _prompt_text(
+                    "Target Windows root dir (fallback)", migration_target_windows_dir
+                )
 
     else:
         target = _prompt_choice("Target", SUPPORTED_TARGETS, "linux")
@@ -119,32 +127,39 @@ def run_wizard(default_output: Path | None = None) -> None:
         if topic == "migrate":
             migration_source_os = _prompt_choice("Migration source OS", SUPPORTED_MIGRATION_OS, "windows")
             migration_target_os = _prompt_choice("Migration target OS", SUPPORTED_MIGRATION_OS, "linux")
+            if not _prompt_yes_no(
+                "Auto-detect source/target data paths from running services (recommended)?",
+                default_yes=True,
+            ):
+                if migration_source_os == "linux":
+                    migration_source_linux_data_dir = _prompt_text(
+                        "Source Linux data dir (fallback)", migration_source_linux_data_dir
+                    )
+                else:
+                    migration_source_windows_dir = _prompt_text(
+                        "Source Windows root dir (fallback)", migration_source_windows_dir
+                    )
 
-            if migration_source_os == "linux":
-                migration_source_linux_data_dir = _prompt_text(
-                    "Source Linux data dir", migration_source_linux_data_dir
-                )
-            else:
-                migration_source_windows_dir = _prompt_text(
-                    "Source Windows root dir", migration_source_windows_dir
-                )
-
-            if migration_target_os == "linux":
-                migration_target_linux_data_dir = _prompt_text(
-                    "Target Linux data dir", migration_target_linux_data_dir
-                )
-            else:
-                migration_target_windows_dir = _prompt_text(
-                    "Target Windows root dir", migration_target_windows_dir
-                )
+                if migration_target_os == "linux":
+                    migration_target_linux_data_dir = _prompt_text(
+                        "Target Linux data dir (fallback)", migration_target_linux_data_dir
+                    )
+                else:
+                    migration_target_windows_dir = _prompt_text(
+                        "Target Windows root dir (fallback)", migration_target_windows_dir
+                    )
         else:
             host = _prompt_text("Public host/IP used by hbbs -r", host)
-            if target == "linux":
-                linux_install_dir = _prompt_text("Linux install dir", linux_install_dir)
-                linux_data_dir = _prompt_text("Linux data dir", linux_data_dir)
-                linux_log_dir = _prompt_text("Linux log dir", linux_log_dir)
-            elif target == "windows":
-                windows_dir = _prompt_text("Windows root dir", windows_dir)
+            if not _prompt_yes_no(
+                "Auto-detect runtime paths from running services/processes (recommended)?",
+                default_yes=True,
+            ):
+                if target == "linux":
+                    linux_install_dir = _prompt_text("Linux install dir (fallback)", linux_install_dir)
+                    linux_data_dir = _prompt_text("Linux data dir (fallback)", linux_data_dir)
+                    linux_log_dir = _prompt_text("Linux log dir (fallback)", linux_log_dir)
+                elif target == "windows":
+                    windows_dir = _prompt_text("Windows root dir (fallback)", windows_dir)
 
     guide = render_guide(
         target=target,

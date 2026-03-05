@@ -28,6 +28,10 @@ def test_cross_migration_windows_to_linux_contains_key_files() -> None:
     assert "Migration: Windows -> Linux" in output
     assert "id_ed25519" in output
     assert "db_v2.sqlite3" in output
+    assert "Resolve-RustDeskDataDir" in output
+    assert "resolve_rustdesk_data_dir" in output
+    assert "RUSTDESK_SOURCE_DATA_DIR" in output
+    assert "RUSTDESK_TARGET_DATA_DIR" in output
 
 
 def test_cross_migration_linux_to_linux_supported() -> None:
@@ -38,6 +42,9 @@ def test_cross_migration_linux_to_linux_supported() -> None:
         migration_target_os="linux",
     )
     assert "Migration: Linux -> Linux" in output
+    assert "resolve_target_data_dir" in output
+    assert "RUSTDESK_SOURCE_DATA_DIR" in output
+    assert "RUSTDESK_TARGET_DATA_DIR" in output
 
 
 def test_cross_migration_windows_to_windows_supported() -> None:
@@ -48,6 +55,9 @@ def test_cross_migration_windows_to_windows_supported() -> None:
         migration_target_os="windows",
     )
     assert "Migration: Windows -> Windows" in output
+    assert "Resolve-RustDeskDataDir" in output
+    assert "RUSTDESK_SOURCE_DATA_DIR" in output
+    assert "RUSTDESK_TARGET_DATA_DIR" in output
 
 
 def test_cross_migration_linux_to_windows_supported() -> None:

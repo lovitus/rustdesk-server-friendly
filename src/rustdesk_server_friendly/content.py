@@ -517,12 +517,55 @@ def _migration_windows_to_linux(source_windows_dir: str, target_linux_data_dir: 
         # Or stop NSSM services if PM2 is not used.
         ```
 
-        Step 2: Build source backup package on Windows
+        Step 2: Build source backup package on Windows (auto-detect source data dir)
         ```powershell
-        $SourceData = Join-Path "{source_windows_dir}" "data"
+        $DefaultSourceData = Join-Path "{source_windows_dir}" "data"
         $BackupRoot = "C:\\rustdesk-migration-backup"
         $Bundle = Join-Path $BackupRoot "bundle"
         $Zip = Join-Path $BackupRoot "rustdesk-migration-backup.zip"
+
+        function Resolve-RustDeskDataDir {{
+            param([string]$Fallback)
+
+            if ($env:RUSTDESK_SOURCE_DATA_DIR -and (Test-Path $env:RUSTDESK_SOURCE_DATA_DIR)) {{
+                return $env:RUSTDESK_SOURCE_DATA_DIR
+            }}
+
+            try {{
+                $items = pm2 jlist | ConvertFrom-Json
+                foreach ($item in $items) {{
+                    if ($item.name -in @("rustdesk-hbbs", "hbbs")) {{
+                        $cwd = $item.pm2_env.pm_cwd
+                        if ($cwd -and (Test-Path $cwd)) {{
+                            if ((Test-Path (Join-Path $cwd "id_ed25519")) -or (Test-Path (Join-Path $cwd "db_v2.sqlite3"))) {{
+                                return $cwd
+                            }}
+                            $fromParent = Join-Path (Split-Path $cwd -Parent) "data"
+                            if (Test-Path $fromParent) {{ return $fromParent }}
+                        }}
+                    }}
+                }}
+            }} catch {{}}
+
+            foreach ($svc in @("rustdesk-hbbs", "hbbs", "rustdesksignal")) {{
+                try {{
+                    $svcParams = Get-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$svc\\Parameters" -ErrorAction Stop
+                    if ($svcParams.AppDirectory) {{
+                        if (Test-Path (Join-Path $svcParams.AppDirectory "id_ed25519")) {{ return $svcParams.AppDirectory }}
+                        $fromSvc = Join-Path $svcParams.AppDirectory "data"
+                        if (Test-Path $fromSvc) {{ return $fromSvc }}
+                    }}
+                }} catch {{}}
+            }}
+
+            foreach ($candidate in @($Fallback, "C:\\RustDesk-Server\\data", "C:\\rustdesk-server\\data", "C:\\Program Files\\RustDesk Server\\data")) {{
+                if ($candidate -and (Test-Path $candidate)) {{ return $candidate }}
+            }}
+            return $Fallback
+        }}
+
+        $SourceData = Resolve-RustDeskDataDir -Fallback $DefaultSourceData
+        Write-Host "[INFO] Source data dir: $SourceData"
 
         New-Item -ItemType Directory -Force -Path $Bundle | Out-Null
         if (Test-Path $Zip) {{ Remove-Item $Zip -Force }}
@@ -546,13 +589,48 @@ def _migration_windows_to_linux(source_windows_dir: str, target_linux_data_dir: 
         scp C:/rustdesk-migration-backup/rustdesk-migration-backup.zip user@<TARGET_LINUX_HOST>:/tmp/
         ```
 
-        Step 4: Restore on Linux target (overwrite-protected)
+        Step 4: Restore on Linux target (auto-detect target data dir, overwrite-protected)
         ```bash
         set -euo pipefail
 
-        TARGET_DATA_DIR="{target_linux_data_dir}"
+        DEFAULT_TARGET_DATA_DIR="{target_linux_data_dir}"
         ARCHIVE="/tmp/rustdesk-migration-backup.zip"
         ALLOW_OVERWRITE="${{ALLOW_OVERWRITE:-0}}"
+
+        resolve_rustdesk_data_dir() {{
+          fallback="$1"
+          if [ -n "${{RUSTDESK_TARGET_DATA_DIR:-}}" ] && [ -d "${{RUSTDESK_TARGET_DATA_DIR}}" ]; then
+            echo "${{RUSTDESK_TARGET_DATA_DIR}}"
+            return
+          fi
+
+          for unit in rustdesk-hbbs rustdesk-hbbr hbbs rustdesksignal; do
+            wd=$(systemctl show -p WorkingDirectory --value "$unit" 2>/dev/null || true)
+            if [ -n "$wd" ] && [ "$wd" != "-" ] && [ -d "$wd" ]; then
+              echo "$wd"
+              return
+            fi
+          done
+
+          for proc in hbbs rustdesksignal; do
+            pid=$(pgrep -xo "$proc" 2>/dev/null || true)
+            if [ -n "$pid" ] && [ -d "/proc/$pid/cwd" ]; then
+              readlink -f "/proc/$pid/cwd"
+              return
+            fi
+          done
+
+          for d in "$fallback" /var/lib/rustdesk-server /opt/rustdesk-server /opt/rustdesk; do
+            if [ -d "$d" ]; then
+              echo "$d"
+              return
+            fi
+          done
+          echo "$fallback"
+        }}
+
+        TARGET_DATA_DIR="${{RUSTDESK_TARGET_DATA_DIR:-$(resolve_rustdesk_data_dir "$DEFAULT_TARGET_DATA_DIR")}}"
+        echo "[INFO] Target data dir: $TARGET_DATA_DIR"
 
         [ -f "$ARCHIVE" ] || {{ echo "[STOP] $ARCHIVE not found"; exit 1; }}
 
@@ -596,13 +674,48 @@ def _migration_linux_to_windows(source_linux_data_dir: str, target_windows_dir: 
         sudo systemctl stop rustdesk-hbbs rustdesk-hbbr
         ```
 
-        Step 2: Build source backup package on Linux
+        Step 2: Build source backup package on Linux (auto-detect source data dir)
         ```bash
         set -euo pipefail
 
-        SOURCE_DATA_DIR="{source_linux_data_dir}"
+        DEFAULT_SOURCE_DATA_DIR="{source_linux_data_dir}"
         BACKUP_DIR="/tmp/rustdesk-migration-backup"
         ARCHIVE="/tmp/rustdesk-migration-backup.tgz"
+
+        resolve_rustdesk_data_dir() {{
+          fallback="$1"
+          if [ -n "${{RUSTDESK_SOURCE_DATA_DIR:-}}" ] && [ -d "${{RUSTDESK_SOURCE_DATA_DIR}}" ]; then
+            echo "${{RUSTDESK_SOURCE_DATA_DIR}}"
+            return
+          fi
+
+          for unit in rustdesk-hbbs rustdesk-hbbr hbbs rustdesksignal; do
+            wd=$(systemctl show -p WorkingDirectory --value "$unit" 2>/dev/null || true)
+            if [ -n "$wd" ] && [ "$wd" != "-" ] && [ -d "$wd" ]; then
+              echo "$wd"
+              return
+            fi
+          done
+
+          for proc in hbbs rustdesksignal; do
+            pid=$(pgrep -xo "$proc" 2>/dev/null || true)
+            if [ -n "$pid" ] && [ -d "/proc/$pid/cwd" ]; then
+              readlink -f "/proc/$pid/cwd"
+              return
+            fi
+          done
+
+          for d in "$fallback" /var/lib/rustdesk-server /opt/rustdesk-server /opt/rustdesk; do
+            if [ -d "$d" ]; then
+              echo "$d"
+              return
+            fi
+          done
+          echo "$fallback"
+        }}
+
+        SOURCE_DATA_DIR="${{RUSTDESK_SOURCE_DATA_DIR:-$(resolve_rustdesk_data_dir "$DEFAULT_SOURCE_DATA_DIR")}}"
+        echo "[INFO] Source data dir: $SOURCE_DATA_DIR"
 
         rm -rf "$BACKUP_DIR"
         mkdir -p "$BACKUP_DIR"
@@ -631,13 +744,56 @@ def _migration_linux_to_windows(source_linux_data_dir: str, target_windows_dir: 
         scp /tmp/rustdesk-migration-backup.tgz Administrator@<TARGET_WINDOWS_HOST>:C:/rustdesk-migration-backup/
         ```
 
-        Step 4: Restore on Windows target (overwrite-protected)
+        Step 4: Restore on Windows target (auto-detect target data dir, overwrite-protected)
         ```powershell
         $ErrorActionPreference = "Stop"
 
-        $TargetData = Join-Path "{target_windows_dir}" "data"
+        $DefaultTargetData = Join-Path "{target_windows_dir}" "data"
         $Archive = "C:\\rustdesk-migration-backup\\rustdesk-migration-backup.tgz"
         $AllowOverwrite = ($env:ALLOW_OVERWRITE -eq "1")
+
+        function Resolve-RustDeskDataDir {{
+            param([string]$Fallback)
+
+            if ($env:RUSTDESK_TARGET_DATA_DIR -and (Test-Path $env:RUSTDESK_TARGET_DATA_DIR)) {{
+                return $env:RUSTDESK_TARGET_DATA_DIR
+            }}
+
+            try {{
+                $items = pm2 jlist | ConvertFrom-Json
+                foreach ($item in $items) {{
+                    if ($item.name -in @("rustdesk-hbbs", "hbbs")) {{
+                        $cwd = $item.pm2_env.pm_cwd
+                        if ($cwd -and (Test-Path $cwd)) {{
+                            if ((Test-Path (Join-Path $cwd "id_ed25519")) -or (Test-Path (Join-Path $cwd "db_v2.sqlite3"))) {{
+                                return $cwd
+                            }}
+                            $fromParent = Join-Path (Split-Path $cwd -Parent) "data"
+                            if (Test-Path $fromParent) {{ return $fromParent }}
+                        }}
+                    }}
+                }}
+            }} catch {{}}
+
+            foreach ($svc in @("rustdesk-hbbs", "hbbs", "rustdesksignal")) {{
+                try {{
+                    $svcParams = Get-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$svc\\Parameters" -ErrorAction Stop
+                    if ($svcParams.AppDirectory) {{
+                        if (Test-Path (Join-Path $svcParams.AppDirectory "id_ed25519")) {{ return $svcParams.AppDirectory }}
+                        $fromSvc = Join-Path $svcParams.AppDirectory "data"
+                        if (Test-Path $fromSvc) {{ return $fromSvc }}
+                    }}
+                }} catch {{}}
+            }}
+
+            foreach ($candidate in @($Fallback, "C:\\RustDesk-Server\\data", "C:\\rustdesk-server\\data", "C:\\Program Files\\RustDesk Server\\data")) {{
+                if ($candidate -and (Test-Path $candidate)) {{ return $candidate }}
+            }}
+            return $Fallback
+        }}
+
+        $TargetData = Resolve-RustDeskDataDir -Fallback $DefaultTargetData
+        Write-Host "[INFO] Target data dir: $TargetData"
 
         if (-not (Test-Path $Archive)) {{
             throw "[STOP] Archive not found: $Archive"
@@ -674,13 +830,48 @@ def _migration_linux_to_linux(source_linux_data_dir: str, target_linux_data_dir:
         sudo systemctl stop rustdesk-hbbs rustdesk-hbbr
         ```
 
-        Step 2: Build source backup package
+        Step 2: Build source backup package (auto-detect source data dir)
         ```bash
         set -euo pipefail
 
-        SOURCE_DATA_DIR="{source_linux_data_dir}"
+        DEFAULT_SOURCE_DATA_DIR="{source_linux_data_dir}"
         BACKUP_DIR="/tmp/rustdesk-migration-backup"
         ARCHIVE="/tmp/rustdesk-migration-backup.tgz"
+
+        resolve_rustdesk_data_dir() {{
+          fallback="$1"
+          if [ -n "${{RUSTDESK_SOURCE_DATA_DIR:-}}" ] && [ -d "${{RUSTDESK_SOURCE_DATA_DIR}}" ]; then
+            echo "${{RUSTDESK_SOURCE_DATA_DIR}}"
+            return
+          fi
+
+          for unit in rustdesk-hbbs rustdesk-hbbr hbbs rustdesksignal; do
+            wd=$(systemctl show -p WorkingDirectory --value "$unit" 2>/dev/null || true)
+            if [ -n "$wd" ] && [ "$wd" != "-" ] && [ -d "$wd" ]; then
+              echo "$wd"
+              return
+            fi
+          done
+
+          for proc in hbbs rustdesksignal; do
+            pid=$(pgrep -xo "$proc" 2>/dev/null || true)
+            if [ -n "$pid" ] && [ -d "/proc/$pid/cwd" ]; then
+              readlink -f "/proc/$pid/cwd"
+              return
+            fi
+          done
+
+          for d in "$fallback" /var/lib/rustdesk-server /opt/rustdesk-server /opt/rustdesk; do
+            if [ -d "$d" ]; then
+              echo "$d"
+              return
+            fi
+          done
+          echo "$fallback"
+        }}
+
+        SOURCE_DATA_DIR="${{RUSTDESK_SOURCE_DATA_DIR:-$(resolve_rustdesk_data_dir "$DEFAULT_SOURCE_DATA_DIR")}}"
+        echo "[INFO] Source data dir: $SOURCE_DATA_DIR"
 
         rm -rf "$BACKUP_DIR"
         mkdir -p "$BACKUP_DIR"
@@ -709,13 +900,48 @@ def _migration_linux_to_linux(source_linux_data_dir: str, target_linux_data_dir:
         scp /tmp/rustdesk-migration-backup.tgz user@<TARGET_LINUX_HOST>:/tmp/
         ```
 
-        Step 4: Restore on target Linux (overwrite-protected)
+        Step 4: Restore on target Linux (auto-detect target data dir, overwrite-protected)
         ```bash
         set -euo pipefail
 
-        TARGET_DATA_DIR="{target_linux_data_dir}"
+        DEFAULT_TARGET_DATA_DIR="{target_linux_data_dir}"
         ARCHIVE="/tmp/rustdesk-migration-backup.tgz"
         ALLOW_OVERWRITE="${{ALLOW_OVERWRITE:-0}}"
+
+        resolve_target_data_dir() {{
+          fallback="$1"
+          if [ -n "${{RUSTDESK_TARGET_DATA_DIR:-}}" ] && [ -d "${{RUSTDESK_TARGET_DATA_DIR}}" ]; then
+            echo "${{RUSTDESK_TARGET_DATA_DIR}}"
+            return
+          fi
+
+          for unit in rustdesk-hbbs rustdesk-hbbr hbbs rustdesksignal; do
+            wd=$(systemctl show -p WorkingDirectory --value "$unit" 2>/dev/null || true)
+            if [ -n "$wd" ] && [ "$wd" != "-" ] && [ -d "$wd" ]; then
+              echo "$wd"
+              return
+            fi
+          done
+
+          for proc in hbbs rustdesksignal; do
+            pid=$(pgrep -xo "$proc" 2>/dev/null || true)
+            if [ -n "$pid" ] && [ -d "/proc/$pid/cwd" ]; then
+              readlink -f "/proc/$pid/cwd"
+              return
+            fi
+          done
+
+          for d in "$fallback" /var/lib/rustdesk-server /opt/rustdesk-server /opt/rustdesk; do
+            if [ -d "$d" ]; then
+              echo "$d"
+              return
+            fi
+          done
+          echo "$fallback"
+        }}
+
+        TARGET_DATA_DIR="${{RUSTDESK_TARGET_DATA_DIR:-$(resolve_target_data_dir "$DEFAULT_TARGET_DATA_DIR")}}"
+        echo "[INFO] Target data dir: $TARGET_DATA_DIR"
 
         [ -f "$ARCHIVE" ] || {{ echo "[STOP] $ARCHIVE not found"; exit 1; }}
 
@@ -758,12 +984,63 @@ def _migration_windows_to_windows(source_windows_dir: str, target_windows_dir: s
         # Or stop NSSM services if PM2 is not used.
         ```
 
-        Step 2: Build source backup package
+        Step 2: Build source backup package (auto-detect source data dir)
         ```powershell
-        $SourceData = Join-Path "{source_windows_dir}" "data"
+        $DefaultSourceData = Join-Path "{source_windows_dir}" "data"
         $BackupRoot = "C:\\rustdesk-migration-backup"
         $Bundle = Join-Path $BackupRoot "bundle"
         $Zip = Join-Path $BackupRoot "rustdesk-migration-backup.zip"
+
+        function Resolve-RustDeskDataDir {{
+            param(
+                [string]$Fallback,
+                [string]$OverrideEnv
+            )
+
+            $overrideValue = $null
+            if ($OverrideEnv) {{
+                $entry = Get-Item -Path "Env:$OverrideEnv" -ErrorAction SilentlyContinue
+                if ($entry) {{ $overrideValue = $entry.Value }}
+            }}
+            if ($overrideValue -and (Test-Path $overrideValue)) {{
+                return $overrideValue
+            }}
+
+            try {{
+                $items = pm2 jlist | ConvertFrom-Json
+                foreach ($item in $items) {{
+                    if ($item.name -in @("rustdesk-hbbs", "hbbs")) {{
+                        $cwd = $item.pm2_env.pm_cwd
+                        if ($cwd -and (Test-Path $cwd)) {{
+                            if ((Test-Path (Join-Path $cwd "id_ed25519")) -or (Test-Path (Join-Path $cwd "db_v2.sqlite3"))) {{
+                                return $cwd
+                            }}
+                            $fromParent = Join-Path (Split-Path $cwd -Parent) "data"
+                            if (Test-Path $fromParent) {{ return $fromParent }}
+                        }}
+                    }}
+                }}
+            }} catch {{}}
+
+            foreach ($svc in @("rustdesk-hbbs", "hbbs", "rustdesksignal")) {{
+                try {{
+                    $svcParams = Get-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$svc\\Parameters" -ErrorAction Stop
+                    if ($svcParams.AppDirectory) {{
+                        if (Test-Path (Join-Path $svcParams.AppDirectory "id_ed25519")) {{ return $svcParams.AppDirectory }}
+                        $fromSvc = Join-Path $svcParams.AppDirectory "data"
+                        if (Test-Path $fromSvc) {{ return $fromSvc }}
+                    }}
+                }} catch {{}}
+            }}
+
+            foreach ($candidate in @($Fallback, "C:\\RustDesk-Server\\data", "C:\\rustdesk-server\\data", "C:\\Program Files\\RustDesk Server\\data")) {{
+                if ($candidate -and (Test-Path $candidate)) {{ return $candidate }}
+            }}
+            return $Fallback
+        }}
+
+        $SourceData = Resolve-RustDeskDataDir -Fallback $DefaultSourceData -OverrideEnv "RUSTDESK_SOURCE_DATA_DIR"
+        Write-Host "[INFO] Source data dir: $SourceData"
 
         New-Item -ItemType Directory -Force -Path $Bundle | Out-Null
         if (Test-Path $Zip) {{ Remove-Item $Zip -Force }}
@@ -791,13 +1068,16 @@ def _migration_windows_to_windows(source_windows_dir: str, target_windows_dir: s
         # scp C:/rustdesk-migration-backup/rustdesk-migration-backup.zip Administrator@<TARGET_WINDOWS_HOST>:C:/rustdesk-migration-backup/
         ```
 
-        Step 4: Restore on target Windows (overwrite-protected)
+        Step 4: Restore on target Windows (auto-detect target data dir, overwrite-protected)
         ```powershell
         $ErrorActionPreference = "Stop"
 
-        $TargetData = Join-Path "{target_windows_dir}" "data"
+        $DefaultTargetData = Join-Path "{target_windows_dir}" "data"
         $Zip = "C:\\rustdesk-migration-backup\\rustdesk-migration-backup.zip"
         $AllowOverwrite = ($env:ALLOW_OVERWRITE -eq "1")
+
+        $TargetData = Resolve-RustDeskDataDir -Fallback $DefaultTargetData -OverrideEnv "RUSTDESK_TARGET_DATA_DIR"
+        Write-Host "[INFO] Target data dir: $TargetData"
 
         if (-not (Test-Path $Zip)) {{
             throw "[STOP] Package not found: $Zip"
@@ -832,6 +1112,7 @@ def _migration_checklist() -> str:
         - Usually migrate: `db_v2.sqlite3` (and `-wal`, `-shm` when present).
         - Do not migrate logs unless needed for audit.
         - Keep old server stopped during cutover to avoid data divergence.
+        - Paths are auto-detected from running service/PM2/NSSM data first; use `RUSTDESK_SOURCE_DATA_DIR` or `RUSTDESK_TARGET_DATA_DIR` to override.
         """
     ).strip()
 

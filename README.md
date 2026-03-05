@@ -3,6 +3,7 @@
 A practical helper app for RustDesk self-hosting with:
 
 - one-line interactive CLI wizard (no parameter memorization)
+- auto-detect paths from running service/PM2/NSSM config
 - Linux and Windows command generation
 - desktop GUI for non-CLI operators
 - log size and retention limits (avoid disk-full incidents)
@@ -47,6 +48,7 @@ rustdesk-friendly guide --target linux --topic all --host rustdesk.example.com
 - asks questions interactively
 - exports runbook to markdown
 - no need to remember parameters
+- defaults to auto-detecting source/target data directories from running services
 
 2. `guide`
 - deterministic output for automation/CI
@@ -83,6 +85,7 @@ Generated scripts include explicit guards to avoid accidental overwrite:
 - `[SKIP]` when binaries/configs/services already exist
 - `[STOP]` when partial/conflicting state is detected
 - `FORCE_REINSTALL=1` and `ALLOW_OVERWRITE=1` as explicit opt-in switches
+- `RUSTDESK_SOURCE_DATA_DIR` / `RUSTDESK_TARGET_DATA_DIR` for manual override when auto-detection is wrong
 
 ## GUI mode
 
