@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/lovitus/rustdesk-server-friendly/internal/backup"
 	"github.com/lovitus/rustdesk-server-friendly/internal/guide"
 )
 
@@ -106,6 +107,9 @@ func Run(in io.Reader, out io.Writer, opts Options) error {
 	if err != nil {
 		return err
 	}
+	if cfg.Topic == "migrate" {
+		fmt.Fprintln(out, "[IMPORTANT] This wizard generates a guide. It does NOT execute migration by default.")
+	}
 	fmt.Fprint(out, "\n===== Generated Guide =====\n\n")
 	fmt.Fprintln(out, rendered)
 
@@ -125,13 +129,44 @@ func Run(in io.Reader, out io.Writer, opts Options) error {
 	}
 
 	if strings.TrimSpace(output) != "" {
-		if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
+		absOut, err := filepath.Abs(output)
+		if err != nil {
+			absOut = output
+		}
+		if err := os.MkdirAll(filepath.Dir(absOut), 0o755); err != nil {
 			return err
 		}
-		if err := os.WriteFile(output, []byte(rendered), 0o644); err != nil {
+		if err := os.WriteFile(absOut, []byte(rendered), 0o644); err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "Saved: %s\n", output)
+		st, err := os.Stat(absOut)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "Saved: %s (%d bytes)\n", absOut, st.Size())
+	}
+
+	if cfg.Topic == "migrate" {
+		runBackup, err := promptYesNo(reader, out, "Create local source backup archive now?", false)
+		if err != nil {
+			return err
+		}
+		if runBackup {
+			sourceDir := ""
+			if cfg.MigrationSourceOS == "windows" {
+				sourceDir = filepath.Join(cfg.MigrationSourceWindows, "data")
+			} else {
+				sourceDir = cfg.MigrationSourceLinux
+			}
+			_, err := backup.Run(backup.Options{
+				SourceOS:      cfg.MigrationSourceOS,
+				SourceDataDir: sourceDir,
+				Out:           out,
+			})
+			if err != nil {
+				fmt.Fprintf(out, "[STOP] Backup failed: %v\n", err)
+			}
+		}
 	}
 
 	return nil

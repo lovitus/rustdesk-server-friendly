@@ -3,6 +3,7 @@
 A Go-based CLI for generating RustDesk self-host runbooks with:
 
 - one-line interactive wizard (`rustdesk-friendly`)
+- executable local backup command (`rustdesk-friendly apply backup`)
 - idempotent deploy/service/log scripts (`[SKIP]` / `[STOP]` guards)
 - migration guides for all pairs:
   - Linux -> Linux
@@ -87,7 +88,14 @@ rustdesk-friendly guide \
   --migration-source linux \
   --migration-target windows \
   --output docs/linux-to-windows.md
+
+# execute real source backup now (not just generate guide)
+rustdesk-friendly apply backup --source windows
 ```
+
+Important:
+- `wizard` and `guide` generate documents only.
+- `apply backup` is the command that really creates backup archives.
 
 ## Quality Controls in Generated Scripts
 
