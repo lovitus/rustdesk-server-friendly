@@ -6,11 +6,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/lovitus/rustdesk-server-friendly/internal/backup"
 	"github.com/lovitus/rustdesk-server-friendly/internal/guide"
+	"github.com/lovitus/rustdesk-server-friendly/internal/restore"
 )
 
 type Options struct {
@@ -19,96 +21,153 @@ type Options struct {
 
 func Run(in io.Reader, out io.Writer, opts Options) error {
 	reader := bufio.NewReader(in)
-	cfg := guide.DefaultConfig()
 
-	fmt.Fprintln(out, "RustDesk Server Friendly Wizard")
-	fmt.Fprintln(out, "Generate deployment/service/log/migration runbooks with guided prompts.")
+	fmt.Fprintln(out, "RustDesk Server Friendly")
+	fmt.Fprintln(out, "Choose what to execute:")
 	fmt.Fprintln(out)
 
-	mode, err := promptChoice(reader, out, "Choose workflow", []string{"guided-setup", "guided-migration", "custom"}, "guided-setup")
+	action, err := promptChoice(reader, out, "Action", []string{"backup", "import", "generate-guide"}, "backup")
 	if err != nil {
 		return err
 	}
 
-	switch mode {
-	case "guided-setup":
-		target, err := promptChoice(reader, out, "Target OS", []string{"linux", "windows"}, "linux")
-		if err != nil {
-			return err
-		}
-		cfg.Target = target
-		cfg.Topic = "all"
-		cfg.Host, err = promptText(reader, out, "Public host/IP used by hbbs -r", cfg.Host)
-		if err != nil {
-			return err
-		}
-
-		auto, err := promptYesNo(reader, out, "Auto-detect runtime paths from running services/processes (recommended)?", true)
-		if err != nil {
-			return err
-		}
-		if !auto {
-			if target == "linux" {
-				cfg.LinuxInstallDir, _ = promptText(reader, out, "Linux install dir (fallback)", cfg.LinuxInstallDir)
-				cfg.LinuxDataDir, _ = promptText(reader, out, "Linux data dir (fallback)", cfg.LinuxDataDir)
-				cfg.LinuxLogDir, _ = promptText(reader, out, "Linux log dir (fallback)", cfg.LinuxLogDir)
-			} else {
-				cfg.WindowsDir, _ = promptText(reader, out, "Windows root dir (fallback)", cfg.WindowsDir)
-			}
-		}
-
-	case "guided-migration":
-		cfg.Target = "cross"
-		cfg.Topic = "migrate"
-		var err error
-		cfg.MigrationSourceOS, err = promptChoice(reader, out, "Migration source OS", guide.SupportedMigrationOS, cfg.MigrationSourceOS)
-		if err != nil {
-			return err
-		}
-		cfg.MigrationTargetOS, err = promptChoice(reader, out, "Migration target OS", guide.SupportedMigrationOS, cfg.MigrationTargetOS)
-		if err != nil {
-			return err
-		}
-
-		auto, err := promptYesNo(reader, out, "Auto-detect source/target data paths from running services (recommended)?", true)
-		if err != nil {
-			return err
-		}
-		if !auto {
-			if cfg.MigrationSourceOS == "linux" {
-				cfg.MigrationSourceLinux, _ = promptText(reader, out, "Source Linux data dir (fallback)", cfg.MigrationSourceLinux)
-			} else {
-				cfg.MigrationSourceWindows, _ = promptText(reader, out, "Source Windows root dir (fallback)", cfg.MigrationSourceWindows)
-			}
-			if cfg.MigrationTargetOS == "linux" {
-				cfg.MigrationTargetLinux, _ = promptText(reader, out, "Target Linux data dir (fallback)", cfg.MigrationTargetLinux)
-			} else {
-				cfg.MigrationTargetWindows, _ = promptText(reader, out, "Target Windows root dir (fallback)", cfg.MigrationTargetWindows)
-			}
-		}
-
+	switch action {
+	case "backup":
+		return runBackupFlow(reader, out)
+	case "import":
+		return runImportFlow(reader, out)
 	default:
-		var err error
-		cfg.Target, err = promptChoice(reader, out, "Target", guide.SupportedTargets, cfg.Target)
+		return runGuideFlow(reader, out, opts)
+	}
+}
+
+func runBackupFlow(reader *bufio.Reader, out io.Writer) error {
+	defaultOS := hostOS()
+	sourceOS, err := promptChoice(reader, out, "Source OS", []string{"windows", "linux"}, defaultOS)
+	if err != nil {
+		return err
+	}
+
+	autoDetect, err := promptYesNo(reader, out, "Auto-detect source data directory?", true)
+	if err != nil {
+		return err
+	}
+	sourceDir := ""
+	if !autoDetect {
+		sourceDir, err = promptText(reader, out, "Source data dir", defaultSourceDir(sourceOS))
 		if err != nil {
 			return err
 		}
-		cfg.Topic, err = promptChoice(reader, out, "Topic", guide.SupportedTopics, cfg.Topic)
+	}
+
+	defaultOut := defaultBackupOutput(sourceOS)
+	output, err := promptText(reader, out, "Backup archive output", defaultOut)
+	if err != nil {
+		return err
+	}
+	absOut, _ := filepath.Abs(output)
+
+	force := false
+	if st, err := os.Stat(absOut); err == nil && !st.IsDir() {
+		force, err = promptYesNo(reader, out, "Output exists. Overwrite?", false)
 		if err != nil {
 			return err
 		}
-		if cfg.Topic == "migrate" {
-			cfg.MigrationSourceOS, _ = promptChoice(reader, out, "Migration source OS", guide.SupportedMigrationOS, cfg.MigrationSourceOS)
-			cfg.MigrationTargetOS, _ = promptChoice(reader, out, "Migration target OS", guide.SupportedMigrationOS, cfg.MigrationTargetOS)
+		if !force {
+			return fmt.Errorf("aborted by user: output already exists")
 		}
+	}
+
+	_, err = backup.Run(backup.Options{
+		SourceOS:      sourceOS,
+		SourceDataDir: sourceDir,
+		Output:        absOut,
+		Force:         force,
+		Out:           out,
+	})
+	return err
+}
+
+func runImportFlow(reader *bufio.Reader, out io.Writer) error {
+	defaultOS := hostOS()
+	targetOS, err := promptChoice(reader, out, "Target OS", []string{"windows", "linux"}, defaultOS)
+	if err != nil {
+		return err
+	}
+
+	archive, err := promptText(reader, out, "Backup archive path (.zip/.tgz/.tar.gz)", "")
+	if err != nil {
+		return err
+	}
+	archive = strings.TrimSpace(strings.Trim(archive, `"`))
+	for {
+		if archive == "" {
+			archive, _ = promptText(reader, out, "Backup archive path (.zip/.tgz/.tar.gz)", "")
+			archive = strings.TrimSpace(strings.Trim(archive, `"`))
+			continue
+		}
+		if st, err := os.Stat(archive); err == nil && !st.IsDir() {
+			break
+		}
+		fmt.Fprintln(out, "File not found. Please input a valid archive file path.")
+		archive, _ = promptText(reader, out, "Backup archive path (.zip/.tgz/.tar.gz)", "")
+		archive = strings.TrimSpace(strings.Trim(archive, `"`))
+	}
+
+	autoDetect, err := promptYesNo(reader, out, "Auto-detect target data directory?", true)
+	if err != nil {
+		return err
+	}
+	targetDir := ""
+	if !autoDetect {
+		targetDir, err = promptText(reader, out, "Target data dir", defaultTargetDir(targetOS))
+		if err != nil {
+			return err
+		}
+	}
+
+	force, err := promptYesNo(reader, out, "Allow overwrite when target already has key/db files?", false)
+	if err != nil {
+		return err
+	}
+
+	_, err = restore.Run(restore.Options{
+		TargetOS:      targetOS,
+		Archive:       archive,
+		TargetDataDir: targetDir,
+		Force:         force,
+		Out:           out,
+	})
+	return err
+}
+
+func runGuideFlow(reader *bufio.Reader, out io.Writer, opts Options) error {
+	cfg := guide.DefaultConfig()
+	var err error
+
+	cfg.Target, err = promptChoice(reader, out, "Target", guide.SupportedTargets, cfg.Target)
+	if err != nil {
+		return err
+	}
+	cfg.Topic, err = promptChoice(reader, out, "Topic", guide.SupportedTopics, cfg.Topic)
+	if err != nil {
+		return err
+	}
+	if cfg.Topic == "migrate" {
+		cfg.MigrationSourceOS, _ = promptChoice(reader, out, "Migration source OS", guide.SupportedMigrationOS, cfg.MigrationSourceOS)
+		cfg.MigrationTargetOS, _ = promptChoice(reader, out, "Migration target OS", guide.SupportedMigrationOS, cfg.MigrationTargetOS)
+	}
+	if cfg.Topic != "migrate" {
+		cfg.Host, _ = promptText(reader, out, "Public host/IP used by hbbs -r", cfg.Host)
 	}
 
 	rendered, err := guide.Render(cfg)
 	if err != nil {
 		return err
 	}
+
 	if cfg.Topic == "migrate" {
-		fmt.Fprintln(out, "[IMPORTANT] This wizard generates a guide. It does NOT execute migration by default.")
+		fmt.Fprintln(out, "[IMPORTANT] This is a generated guide only. It does NOT execute migration.")
 	}
 	fmt.Fprint(out, "\n===== Generated Guide =====\n\n")
 	fmt.Fprintln(out, rendered)
@@ -145,31 +204,32 @@ func Run(in io.Reader, out io.Writer, opts Options) error {
 		}
 		fmt.Fprintf(out, "Saved: %s (%d bytes)\n", absOut, st.Size())
 	}
-
-	if cfg.Topic == "migrate" {
-		runBackup, err := promptYesNo(reader, out, "Create local source backup archive now?", false)
-		if err != nil {
-			return err
-		}
-		if runBackup {
-			sourceDir := ""
-			if cfg.MigrationSourceOS == "windows" {
-				sourceDir = filepath.Join(cfg.MigrationSourceWindows, "data")
-			} else {
-				sourceDir = cfg.MigrationSourceLinux
-			}
-			_, err := backup.Run(backup.Options{
-				SourceOS:      cfg.MigrationSourceOS,
-				SourceDataDir: sourceDir,
-				Out:           out,
-			})
-			if err != nil {
-				fmt.Fprintf(out, "[STOP] Backup failed: %v\n", err)
-			}
-		}
-	}
-
 	return nil
+}
+
+func hostOS() string {
+	if runtime.GOOS == "windows" {
+		return "windows"
+	}
+	return "linux"
+}
+
+func defaultSourceDir(osName string) string {
+	if osName == "windows" {
+		return `C:\RustDesk-Server\data`
+	}
+	return "/var/lib/rustdesk-server"
+}
+
+func defaultTargetDir(osName string) string {
+	return defaultSourceDir(osName)
+}
+
+func defaultBackupOutput(sourceOS string) string {
+	if sourceOS == "windows" {
+		return `C:\rustdesk-migration-backup\rustdesk-migration-backup.zip`
+	}
+	return "/tmp/rustdesk-migration-backup.tgz"
 }
 
 func defaultFilename(cfg guide.Config) string {
@@ -180,7 +240,11 @@ func defaultFilename(cfg guide.Config) string {
 }
 
 func promptText(reader *bufio.Reader, out io.Writer, label, def string) (string, error) {
-	fmt.Fprintf(out, "%s [%s]: ", label, def)
+	if def == "" {
+		fmt.Fprintf(out, "%s: ", label)
+	} else {
+		fmt.Fprintf(out, "%s [%s]: ", label, def)
+	}
 	line, err := reader.ReadString('\n')
 	if err != nil && err != io.EOF {
 		return "", err

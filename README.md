@@ -2,8 +2,9 @@
 
 A Go-based CLI for generating RustDesk self-host runbooks with:
 
-- one-line interactive wizard (`rustdesk-friendly`)
+- one-run interactive workflow (`rustdesk-friendly`)
 - executable local backup command (`rustdesk-friendly apply backup`)
+- executable import/restore command (`rustdesk-friendly apply import`)
 - idempotent deploy/service/log scripts (`[SKIP]` / `[STOP]` guards)
 - migration guides for all pairs:
   - Linux -> Linux
@@ -24,7 +25,7 @@ A Go-based CLI for generating RustDesk self-host runbooks with:
 bash <(curl -fsSL https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_linux_binary.sh)
 
 # or pin a release tag
-bash <(curl -fsSL https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_linux_binary.sh) v1.0.0
+bash <(curl -fsSL https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_linux_binary.sh) v1.0.1
 ```
 
 ### Windows PowerShell
@@ -34,7 +35,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/lovitus/rustdesk-server-frie
 iwr -useb https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_windows_binary.ps1 | iex
 
 # specific version
-powershell -ExecutionPolicy Bypass -File .\scripts\install_windows_binary.ps1 -Version v1.0.0
+powershell -ExecutionPolicy Bypass -File .\scripts\install_windows_binary.ps1 -Version v1.0.1
 
 # after install
 rustdesk-friendly
@@ -72,30 +73,20 @@ go build -o rustdesk-friendly.exe .\cmd\rustdesk-friendly
 ## Usage
 
 ```bash
-# interactive wizard (recommended)
+# interactive app (recommended)
 rustdesk-friendly
 
-# explicit wizard
-rustdesk-friendly wizard --output docs/runbook.md
-
-# non-interactive guide generation
-rustdesk-friendly guide --target linux --topic all --host rustdesk.example.com
-
-# migration example: linux -> windows
-rustdesk-friendly guide \
-  --target cross \
-  --topic migrate \
-  --migration-source linux \
-  --migration-target windows \
-  --output docs/linux-to-windows.md
-
-# execute real source backup now (not just generate guide)
+# execute real source backup
 rustdesk-friendly apply backup --source windows
+
+# execute import/restore from archive
+rustdesk-friendly apply import --target linux --archive /tmp/rustdesk-migration-backup.tgz
 ```
 
 Important:
-- `wizard` and `guide` generate documents only.
-- `apply backup` is the command that really creates backup archives.
+- `backup` is read-only: no service stop, no source file modification, no deletion.
+- `import` validates archive structure before writing anything.
+- interactive mode provides 3 choices: `backup` / `import` / `generate-guide`.
 
 ## Quality Controls in Generated Scripts
 

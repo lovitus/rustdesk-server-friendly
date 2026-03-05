@@ -9,6 +9,7 @@ import (
 
 	"github.com/lovitus/rustdesk-server-friendly/internal/backup"
 	"github.com/lovitus/rustdesk-server-friendly/internal/guide"
+	"github.com/lovitus/rustdesk-server-friendly/internal/restore"
 	"github.com/lovitus/rustdesk-server-friendly/internal/wizard"
 )
 
@@ -101,11 +102,13 @@ func runGuide(args []string) error {
 
 func runApply(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("apply requires a subcommand: backup")
+		return fmt.Errorf("apply requires a subcommand: backup|import")
 	}
 	switch strings.ToLower(args[0]) {
 	case "backup":
 		return runApplyBackup(args[1:])
+	case "import":
+		return runApplyImport(args[1:])
 	default:
 		return fmt.Errorf("unknown apply subcommand: %s", args[0])
 	}
@@ -135,6 +138,33 @@ func runApplyBackup(args []string) error {
 	return nil
 }
 
+func runApplyImport(args []string) error {
+	fs := flag.NewFlagSet("apply import", flag.ContinueOnError)
+	target := fs.String("target", "", "target os: windows|linux (default auto by current OS)")
+	archive := fs.String("archive", "", "backup archive path (.zip/.tgz/.tar.gz)")
+	targetDataDir := fs.String("target-data-dir", "", "target rustdesk data dir")
+	force := fs.Bool("force", false, "overwrite existing migration files in target dir")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*archive) == "" {
+		return fmt.Errorf("--archive is required")
+	}
+
+	res, err := restore.Run(restore.Options{
+		TargetOS:      *target,
+		Archive:       *archive,
+		TargetDataDir: *targetDataDir,
+		Force:         *force,
+		Out:           os.Stdout,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("[OK] Import ready in: %s (%d files)\n", res.TargetDataDir, len(res.RestoredFiles))
+	return nil
+}
+
 func printHelp() {
 	fmt.Print(`rustdesk-friendly (Go rewrite)
 
@@ -143,6 +173,7 @@ Usage:
   rustdesk-friendly wizard [--output FILE]
   rustdesk-friendly guide [flags]
   rustdesk-friendly apply backup [flags]
+  rustdesk-friendly apply import [flags]
   rustdesk-friendly version
 
 Guide flags:
@@ -157,6 +188,12 @@ Apply backup flags:
   --source windows|linux
   --source-data-dir <dir>
   --output <archive-path>
+  --force
+
+Apply import flags:
+  --target windows|linux
+  --archive <backup-archive>
+  --target-data-dir <dir>
   --force
 `)
 }

@@ -95,6 +95,7 @@ func Run(opts Options) (Result, error) {
 	}
 
 	if opts.Out != nil {
+		fmt.Fprintf(opts.Out, "[SAFE] Backup is read-only: no service stop, no source file modification, no deletion.\n")
 		fmt.Fprintf(opts.Out, "[OK] Source data dir: %s\n", dataDir)
 		fmt.Fprintf(opts.Out, "[OK] Files packed: %d\n", len(files))
 		for _, f := range files {
