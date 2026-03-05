@@ -1,7 +1,8 @@
 param(
     [string]$Version = "latest",
-    [string]$InstallDir = "C:\Program Files\rustdesk-server-friendly",
-    [string]$DownloadMethod = "auto" # auto|invokewebrequest|curl|gh
+    [string]$InstallDir = "$env:LOCALAPPDATA\rustdesk-server-friendly",
+    [string]$DownloadMethod = "auto", # auto|invokewebrequest|curl|gh
+    [bool]$AddToUserPath = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,5 +60,42 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $Target = Join-Path $InstallDir "rustdesk-friendly.exe"
 Copy-Item $TempExe $Target -Force
 
+$BinDir = Join-Path $InstallDir "bin"
+New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+$BinExe = Join-Path $BinDir "rustdesk-friendly.exe"
+Copy-Item $Target $BinExe -Force
+
+if ($AddToUserPath) {
+    $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ([string]::IsNullOrWhiteSpace($UserPath)) {
+        $UserPath = ""
+    }
+
+    $Exists = $false
+    foreach ($p in ($UserPath -split ';')) {
+        if ($p.Trim() -ieq $BinDir) {
+            $Exists = $true
+            break
+        }
+    }
+
+    if (-not $Exists) {
+        $NewUserPath = if ([string]::IsNullOrWhiteSpace($UserPath)) { $BinDir } else { "$UserPath;$BinDir" }
+        [Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
+        Write-Host "[OK] Added to User PATH: $BinDir"
+    } else {
+        Write-Host "[SKIP] User PATH already contains: $BinDir"
+    }
+}
+
+if (-not ($env:Path -split ';' | Where-Object { $_.Trim() -ieq $BinDir })) {
+    $env:Path = "$BinDir;$env:Path"
+}
+
 Write-Host "[OK] installed: $Target"
-Write-Host "Run: & '$Target'"
+Write-Host ""
+Write-Host "Try now in this PowerShell:"
+Write-Host "rustdesk-friendly"
+Write-Host ""
+Write-Host "If command is still not found, open a new terminal and run:"
+Write-Host "rustdesk-friendly"

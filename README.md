@@ -29,12 +29,21 @@ bash <(curl -fsSL https://raw.githubusercontent.com/lovitus/rustdesk-server-frie
 ### Windows PowerShell
 
 ```powershell
-# latest release
-powershell -ExecutionPolicy Bypass -Command "iwr -useb https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_windows_binary.ps1 | iex"
+# latest release (run in current PowerShell session)
+iwr -useb https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_windows_binary.ps1 | iex
 
 # specific version
 powershell -ExecutionPolicy Bypass -File .\scripts\install_windows_binary.ps1 -Version v1.0.0
+
+# after install
+rustdesk-friendly
 ```
+
+Notes:
+- Do not run raw paths with spaces without call syntax.
+- If you must run full path, use:
+  - `& "C:\Users\<You>\AppData\Local\rustdesk-server-friendly\rustdesk-friendly.exe"`
+- The installer adds `%LOCALAPPDATA%\rustdesk-server-friendly\bin` to user PATH.
 
 ## Build From Source
 
