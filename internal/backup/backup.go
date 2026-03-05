@@ -6,9 +6,11 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -110,8 +112,8 @@ func Run(opts Options) (Result, error) {
 
 func detectDataDir(sourceOS string) string {
 	if env := strings.TrimSpace(os.Getenv("RUSTDESK_SOURCE_DATA_DIR")); env != "" {
-		if isDir(env) {
-			return env
+		if d := chooseBestDataDir([]string{env}); d != "" {
+			return d
 		}
 	}
 
@@ -122,6 +124,7 @@ func detectDataDir(sourceOS string) string {
 			`C:\rustdesk-server\data`,
 			`C:\Program Files\RustDesk Server\data`,
 		}
+		candidates = append(candidates, detectWindowsCandidates()...)
 	} else {
 		candidates = []string{
 			`/var/lib/rustdesk-server`,
@@ -129,13 +132,158 @@ func detectDataDir(sourceOS string) string {
 			`/opt/rustdesk`,
 		}
 	}
+	return chooseBestDataDir(candidates)
+}
 
-	for _, d := range candidates {
-		if isDir(d) {
-			return d
+func chooseBestDataDir(candidates []string) string {
+	firstExisting := ""
+	seen := map[string]bool{}
+	for _, c := range candidates {
+		for _, d := range []string{strings.TrimSpace(c), filepath.Join(strings.TrimSpace(c), "data")} {
+			if d == "" || seen[d] {
+				continue
+			}
+			seen[d] = true
+			if !isDir(d) {
+				continue
+			}
+			if firstExisting == "" {
+				firstExisting = d
+			}
+			if hasExpectedFiles(d) {
+				return d
+			}
 		}
 	}
-	return ""
+	return firstExisting
+}
+
+func hasExpectedFiles(dir string) bool {
+	for _, name := range []string{"id_ed25519", "id_ed25519.pub", "db_v2.sqlite3", "db.sqlite3"} {
+		if st, err := os.Stat(filepath.Join(dir, name)); err == nil && !st.IsDir() {
+			return true
+		}
+	}
+	for _, p := range []string{"db_v2.sqlite3*", "db.sqlite3*"} {
+		matched, _ := filepath.Glob(filepath.Join(dir, p))
+		for _, m := range matched {
+			if st, err := os.Stat(m); err == nil && !st.IsDir() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func detectWindowsCandidates() []string {
+	out := []string{}
+	out = append(out, detectWindowsPM2Candidates()...)
+	out = append(out, detectWindowsServiceCandidates()...)
+	out = append(out, detectWindowsProcessCandidates()...)
+	return dedupe(out)
+}
+
+func detectWindowsPM2Candidates() []string {
+	if !hasCmd("pm2") {
+		return nil
+	}
+	b, err := exec.Command("pm2", "jlist").Output()
+	if err != nil || len(b) == 0 {
+		return nil
+	}
+	type pm2Env struct {
+		PMCwd string `json:"pm_cwd"`
+	}
+	type pm2Entry struct {
+		Name   string `json:"name"`
+		PM2Env pm2Env `json:"pm2_env"`
+	}
+	var entries []pm2Entry
+	if err := json.Unmarshal(b, &entries); err != nil {
+		return nil
+	}
+	out := []string{}
+	for _, e := range entries {
+		n := strings.ToLower(strings.TrimSpace(e.Name))
+		if !strings.Contains(n, "rustdesk") && n != "hbbs" && n != "hbbr" {
+			continue
+		}
+		if strings.TrimSpace(e.PM2Env.PMCwd) != "" {
+			out = append(out, e.PM2Env.PMCwd)
+		}
+	}
+	return dedupe(out)
+}
+
+func detectWindowsServiceCandidates() []string {
+	if !hasCmd("powershell") {
+		return nil
+	}
+	script := `$names=@('rustdesk-hbbs','rustdesk-hbbr','rustdesksignal','rustdeskrelay','hbbs','hbbr');
+foreach($n in $names){
+  $p1="HKLM:\SYSTEM\CurrentControlSet\Services\$n\Parameters"
+  try{$app=(Get-ItemProperty -Path $p1 -ErrorAction Stop).AppDirectory; if($app){$app}}catch{}
+  $p2="HKLM:\SYSTEM\CurrentControlSet\Services\$n"
+  try{
+    $img=(Get-ItemProperty -Path $p2 -ErrorAction Stop).ImagePath
+    if($img){
+      $expanded=[Environment]::ExpandEnvironmentVariables($img)
+      $m=[regex]::Match($expanded,'^\"?([^\" ]+\.exe)')
+      if($m.Success){Split-Path -Parent $m.Groups[1].Value}
+    }
+  }catch{}
+}`
+	b, err := exec.Command("powershell", "-NoProfile", "-Command", script).Output()
+	if err != nil || len(b) == 0 {
+		return nil
+	}
+	out := []string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return dedupe(out)
+}
+
+func detectWindowsProcessCandidates() []string {
+	if !hasCmd("powershell") {
+		return nil
+	}
+	script := `Get-Process -Name hbbs,hbbr,rustdesksignal,rustdeskrelay -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path`
+	b, err := exec.Command("powershell", "-NoProfile", "-Command", script).Output()
+	if err != nil || len(b) == 0 {
+		return nil
+	}
+	out := []string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		out = append(out, filepath.Dir(line))
+	}
+	return dedupe(out)
+}
+
+func hasCmd(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+func dedupe(in []string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, v := range in {
+		v = strings.TrimSpace(v)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 func isDir(path string) bool {

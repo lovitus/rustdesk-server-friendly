@@ -2,6 +2,7 @@ package wizard
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -78,14 +79,25 @@ func runBackupFlow(reader *bufio.Reader, out io.Writer) error {
 		}
 	}
 
-	_, err = backup.Run(backup.Options{
-		SourceOS:      sourceOS,
-		SourceDataDir: sourceDir,
-		Output:        absOut,
-		Force:         force,
-		Out:           out,
-	})
-	return err
+	for attempt := 0; attempt < 2; attempt++ {
+		_, err = backup.Run(backup.Options{
+			SourceOS:      sourceOS,
+			SourceDataDir: sourceDir,
+			Output:        absOut,
+			Force:         force,
+			Out:           out,
+		})
+		if err == nil {
+			return nil
+		}
+		if attempt == 0 && autoDetect && strings.Contains(strings.ToLower(err.Error()), "cannot detect rustdesk source data dir") {
+			fmt.Fprintln(out, "[WARN] Auto-detect failed. Please input source data directory manually.")
+			sourceDir, _ = promptText(reader, out, "Source data dir", defaultSourceDir(sourceOS))
+			continue
+		}
+		return err
+	}
+	return errors.New("backup failed")
 }
 
 func runImportFlow(reader *bufio.Reader, out io.Writer) error {

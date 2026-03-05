@@ -25,7 +25,7 @@ A Go-based CLI for generating RustDesk self-host runbooks with:
 bash <(curl -fsSL https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_linux_binary.sh)
 
 # or pin a release tag
-bash <(curl -fsSL https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_linux_binary.sh) v1.0.1
+bash <(curl -fsSL https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_linux_binary.sh) v1.1.0
 ```
 
 ### Windows PowerShell
@@ -35,7 +35,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/lovitus/rustdesk-server-frie
 iwr -useb https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_windows_binary.ps1 | iex
 
 # specific version
-powershell -ExecutionPolicy Bypass -File .\scripts\install_windows_binary.ps1 -Version v1.0.1
+powershell -ExecutionPolicy Bypass -File .\scripts\install_windows_binary.ps1 -Version v1.1.0
 
 # after install
 rustdesk-friendly
@@ -87,6 +87,7 @@ Important:
 - `backup` is read-only: no service stop, no source file modification, no deletion.
 - `import` validates archive structure before writing anything.
 - interactive mode provides 3 choices: `backup` / `import` / `generate-guide`.
+- if auto-detect fails, program will immediately ask for manual path and retry.
 
 ## Quality Controls in Generated Scripts
 
