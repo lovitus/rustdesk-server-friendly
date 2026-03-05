@@ -2,11 +2,16 @@
 
 A practical helper app for RustDesk self-hosting with:
 
+- one-line interactive CLI wizard (no parameter memorization)
 - Linux and Windows command generation
-- Desktop GUI for non-CLI operators
-- Log size and retention limits (avoid disk-full incidents)
-- Service installation instructions (systemd / PM2 / NSSM)
-- Windows Server -> Linux Server migration checklist and commands
+- desktop GUI for non-CLI operators
+- log size and retention limits (avoid disk-full incidents)
+- service installation instructions (systemd / PM2 / NSSM)
+- guided migration checklists and commands for all pairs:
+  - Linux -> Linux
+  - Linux -> Windows
+  - Windows -> Linux
+  - Windows -> Windows
 
 ## Why this project
 
@@ -15,39 +20,9 @@ Self-hosting RustDesk is easy to start but often hard to standardize:
 - people do not know which binaries to install
 - service setup differs by OS
 - logs may fill the disk if not rotated
-- migration from Windows to Linux is risky without a clear file checklist
+- migration is risky without a clear file checklist
 
 This tool makes those steps repeatable and exportable.
-
-## Features
-
-1. CLI mode
-- Generate markdown guides directly in terminal or files.
-- Example:
-
-```bash
-python -m rustdesk_server_friendly guide --target linux --topic all --host my-rustdesk.example.com
-```
-
-2. GUI mode
-- Desktop UI for selecting target/topic and copying scripts.
-- Example:
-
-```bash
-python -m rustdesk_server_friendly gui
-```
-
-3. Topics
-- `deploy`: binary download + initial setup
-- `service`: install/enable service instances
-- `logs`: log rotation + retention policy
-- `migrate`: Windows -> Linux migration
-- `all`: all available topics for target
-
-4. Targets
-- `linux`
-- `windows`
-- `cross` (for migration topic)
 
 ## Quick start
 
@@ -56,35 +31,66 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 
-# CLI output in terminal
-rustdesk-friendly guide --target windows --topic service --host 203.0.113.10
+# one-line interactive wizard (recommended)
+rustdesk-friendly
 
-# Export to file
-rustdesk-friendly guide --target cross --topic migrate --output docs/windows-to-linux-migration.md
+# explicit wizard command
+rustdesk-friendly wizard
 
-# Launch GUI
+# direct non-interactive generation (optional)
+rustdesk-friendly guide --target linux --topic all --host rustdesk.example.com
+```
+
+## CLI modes
+
+1. `wizard` (recommended)
+- asks questions interactively
+- exports runbook to markdown
+- no need to remember parameters
+
+2. `guide`
+- deterministic output for automation/CI
+- supports explicit migration pair selection
+
+Examples:
+
+```bash
+# Migration Linux -> Windows
+rustdesk-friendly guide \
+  --target cross \
+  --topic migrate \
+  --migration-source linux \
+  --migration-target windows \
+  --source-linux-data-dir /var/lib/rustdesk-server \
+  --target-windows-dir "C:\\RustDesk-Server" \
+  --output docs/linux-to-windows.md
+
+# Migration Windows -> Windows
+rustdesk-friendly guide \
+  --target cross \
+  --topic migrate \
+  --migration-source windows \
+  --migration-target windows \
+  --source-windows-dir "C:\\Old-RustDesk" \
+  --target-windows-dir "D:\\RustDesk-Server" \
+  --output docs/windows-to-windows.md
+```
+
+## Idempotent behavior
+
+Generated scripts include explicit guards to avoid accidental overwrite:
+
+- `[SKIP]` when binaries/configs/services already exist
+- `[STOP]` when partial/conflicting state is detected
+- `FORCE_REINSTALL=1` and `ALLOW_OVERWRITE=1` as explicit opt-in switches
+
+## GUI mode
+
+```bash
 rustdesk-friendly gui
 ```
 
 If your Python build has no `tkinter` (common on minimal Linux/macOS builds), CLI still works and GUI will print a clear dependency message.
-
-## Example output
-
-Generate a full Linux playbook:
-
-```bash
-rustdesk-friendly guide --target linux --topic all --host rustdesk.your-domain.com --output linux-runbook.md
-```
-
-## Migration essentials covered by this app
-
-When moving from Windows Server to Linux Server, this app highlights the critical files:
-
-- `id_ed25519`
-- `id_ed25519.pub`
-- `db_v2.sqlite3` (+ `-wal` / `-shm` when present)
-
-It also includes stop/backup/restore/verify commands and a cutover checklist.
 
 ## Verification
 

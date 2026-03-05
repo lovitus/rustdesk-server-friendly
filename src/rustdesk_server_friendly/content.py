@@ -6,6 +6,7 @@ from textwrap import dedent
 
 SUPPORTED_TARGETS = ("linux", "windows", "cross")
 SUPPORTED_TOPICS = ("deploy", "logs", "service", "migrate", "all")
+SUPPORTED_MIGRATION_OS = ("linux", "windows")
 
 SOURCES = {
     "rustdesk_server_readme": "https://github.com/rustdesk/rustdesk-server",
@@ -22,20 +23,53 @@ def render_guide(
     linux_install_dir: str = "/opt/rustdesk-server",
     linux_data_dir: str = "/var/lib/rustdesk-server",
     linux_log_dir: str = "/var/log/rustdesk-server",
+    migration_source_os: str = "windows",
+    migration_target_os: str = "linux",
+    migration_source_windows_dir: str = r"C:\RustDesk-Server",
+    migration_target_windows_dir: str = r"C:\RustDesk-Server",
+    migration_source_linux_data_dir: str = "/var/lib/rustdesk-server",
+    migration_target_linux_data_dir: str = "/var/lib/rustdesk-server",
 ) -> str:
     """Render markdown guidance for a specific target/topic pair."""
     target = target.lower().strip()
     topic = topic.lower().strip()
+    migration_source_os = migration_source_os.lower().strip()
+    migration_target_os = migration_target_os.lower().strip()
 
     if target not in SUPPORTED_TARGETS:
         raise ValueError(f"Unsupported target: {target}")
     if topic not in SUPPORTED_TOPICS:
         raise ValueError(f"Unsupported topic: {topic}")
+    if migration_source_os not in SUPPORTED_MIGRATION_OS:
+        raise ValueError(f"Unsupported migration source OS: {migration_source_os}")
+    if migration_target_os not in SUPPORTED_MIGRATION_OS:
+        raise ValueError(f"Unsupported migration target OS: {migration_target_os}")
 
     host = host.strip() or "<PUBLIC_HOST_OR_IP>"
 
     sections: list[str] = []
-    sections.append(_title(target, topic))
+    sections.append(
+        _title(
+            target=target,
+            topic=topic,
+            migration_source_os=migration_source_os,
+            migration_target_os=migration_target_os,
+        )
+    )
+
+    if topic == "migrate":
+        sections.append(
+            _migration_guide(
+                source_os=migration_source_os,
+                target_os=migration_target_os,
+                source_windows_dir=migration_source_windows_dir,
+                target_windows_dir=migration_target_windows_dir,
+                source_linux_data_dir=migration_source_linux_data_dir,
+                target_linux_data_dir=migration_target_linux_data_dir,
+            )
+        )
+        sections.append(_source_notes())
+        return "\n\n".join(sections).strip() + "\n"
 
     if target == "linux":
         if topic in ("deploy", "all"):
@@ -44,92 +78,103 @@ def render_guide(
             sections.append(_linux_service(host, linux_install_dir, linux_data_dir, linux_log_dir))
         if topic in ("logs", "all"):
             sections.append(_linux_log_limits(linux_log_dir))
-        if topic == "migrate":
-            sections.append(
-                "`migrate` topic is cross-platform. Use `--target cross --topic migrate` instead."
-            )
 
-    if target == "windows":
+    elif target == "windows":
         if topic in ("deploy", "all"):
             sections.append(_windows_deploy(host, windows_dir))
         if topic in ("service", "all"):
             sections.append(_windows_service(host, windows_dir))
         if topic in ("logs", "all"):
             sections.append(_windows_log_limits())
-        if topic == "migrate":
-            sections.append(
-                "`migrate` topic is cross-platform. Use `--target cross --topic migrate` instead."
-            )
 
-    if target == "cross":
-        if topic in ("migrate", "all"):
-            sections.append(_windows_to_linux_migration(windows_dir, linux_data_dir))
-        else:
-            sections.append("For `cross` target, only `migrate` or `all` is valid.")
+    else:
+        sections.append(
+            "`cross` target is for migration mode. Use `--topic migrate` with migration source/target OS options."
+        )
 
     sections.append(_source_notes())
     return "\n\n".join(sections).strip() + "\n"
 
 
-def _title(target: str, topic: str) -> str:
-    return dedent(
-        f"""
-        # RustDesk Server Friendly Guide
-
-        - Target: `{target}`
-        - Topic: `{topic}`
-        """
-    ).strip()
+def _title(target: str, topic: str, migration_source_os: str, migration_target_os: str) -> str:
+    lines = [
+        "# RustDesk Server Friendly Guide",
+        "",
+        f"- Target: `{target}`",
+        f"- Topic: `{topic}`",
+    ]
+    if topic == "migrate":
+        lines.append(f"- Migration Pair: `{migration_source_os} -> {migration_target_os}`")
+    return "\n".join(lines)
 
 
 def _linux_deploy(host: str, install_dir: str, data_dir: str, log_dir: str) -> str:
     return dedent(
         f"""
-        ## Linux CLI Deploy (Binary)
+        ## Linux CLI Deploy (Binary, Idempotent)
 
         ```bash
         set -euo pipefail
 
-        # 1) Base packages
-        sudo apt-get update
-        sudo apt-get install -y curl tar unzip
+        INSTALL_DIR="{install_dir}"
+        DATA_DIR="{data_dir}"
+        LOG_DIR="{log_dir}"
+        FORCE_REINSTALL="${{FORCE_REINSTALL:-0}}"
 
-        # 2) Prepare folders
-        sudo install -d -m 0755 {install_dir}/bin {data_dir} {log_dir}
+        if [ -x "$INSTALL_DIR/bin/hbbs" ] && [ -x "$INSTALL_DIR/bin/hbbr" ]; then
+          echo "[SKIP] RustDesk binaries already exist at $INSTALL_DIR/bin"
+        else
+          if [ "$FORCE_REINSTALL" != "1" ] && {{ [ -e "$INSTALL_DIR/bin/hbbs" ] || [ -e "$INSTALL_DIR/bin/hbbr" ]; }}; then
+            echo "[STOP] Partial install detected. Set FORCE_REINSTALL=1 to overwrite existing binaries."
+            exit 1
+          fi
 
-        # 3) Fetch latest RustDesk Server OSS release
-        TAG=$(curl -fsSL https://api.github.com/repos/rustdesk/rustdesk-server/releases/latest | awk -F '"' '/tag_name/{{print $4; exit}}')
-        ARCH=$(uname -m)
-        case "$ARCH" in
-          x86_64) PKG_ARCH="amd64" ;;
-          aarch64|arm64) PKG_ARCH="arm64" ;;
-          armv7l) PKG_ARCH="armv7" ;;
-          *) echo "Unsupported arch: $ARCH"; exit 1 ;;
-        esac
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y curl tar unzip
+          elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y curl tar unzip
+          elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y curl tar unzip
+          else
+            echo "[STOP] Supported package manager (apt/dnf/yum) not found."
+            exit 1
+          fi
 
-        TMPDIR=$(mktemp -d)
-        trap 'rm -rf "$TMPDIR"' EXIT
+          sudo install -d -m 0755 "$INSTALL_DIR/bin" "$DATA_DIR" "$LOG_DIR"
 
-        curl -fL "https://github.com/rustdesk/rustdesk-server/releases/download/${{TAG}}/rustdesk-server-linux-${{PKG_ARCH}}.tar.gz" -o "$TMPDIR/rustdesk-server.tar.gz"
-        tar -xzf "$TMPDIR/rustdesk-server.tar.gz" -C "$TMPDIR"
+          TAG=$(curl -fsSL https://api.github.com/repos/rustdesk/rustdesk-server/releases/latest | awk -F '"' '/tag_name/{{print $4; exit}}')
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64) PKG_ARCH="amd64" ;;
+            aarch64|arm64) PKG_ARCH="arm64" ;;
+            armv7l) PKG_ARCH="armv7" ;;
+            *) echo "[STOP] Unsupported arch: $ARCH"; exit 1 ;;
+          esac
 
-        HBBS=$(find "$TMPDIR" -type f -name hbbs | head -n1)
-        HBBR=$(find "$TMPDIR" -type f -name hbbr | head -n1)
-        [ -n "$HBBS" ] && [ -n "$HBBR" ]
+          TMPDIR=$(mktemp -d)
+          trap 'rm -rf "$TMPDIR"' EXIT
 
-        sudo install -m 0755 "$HBBS" {install_dir}/bin/hbbs
-        sudo install -m 0755 "$HBBR" {install_dir}/bin/hbbr
+          curl -fL "https://github.com/rustdesk/rustdesk-server/releases/download/${{TAG}}/rustdesk-server-linux-${{PKG_ARCH}}.tar.gz" -o "$TMPDIR/rustdesk-server.tar.gz"
+          tar -xzf "$TMPDIR/rustdesk-server.tar.gz" -C "$TMPDIR"
 
-        # 4) Open required ports
-        # TCP: 21115-21117, 21118; UDP: 21116
-        sudo ufw allow 21115:21118/tcp || true
-        sudo ufw allow 21116/udp || true
+          HBBS=$(find "$TMPDIR" -type f -name hbbs | head -n1)
+          HBBR=$(find "$TMPDIR" -type f -name hbbr | head -n1)
+          [ -n "$HBBS" ] && [ -n "$HBBR" ]
 
-        echo "Binary deploy prepared. Next: install services."
+          sudo install -m 0755 "$HBBS" "$INSTALL_DIR/bin/hbbs"
+          sudo install -m 0755 "$HBBR" "$INSTALL_DIR/bin/hbbr"
+          echo "[OK] Binaries installed into $INSTALL_DIR/bin"
+        fi
+
+        # Optional firewall setup (idempotent)
+        if command -v ufw >/dev/null 2>&1; then
+          sudo ufw allow 21115:21118/tcp || true
+          sudo ufw allow 21116/udp || true
+        fi
+
+        echo "Next: apply service setup section."
         ```
-
-        GUI-friendly option:
-        - Run this app with `--gui`, pick `linux + deploy`, then copy/export the generated commands.
         """
     ).strip()
 
@@ -137,12 +182,16 @@ def _linux_deploy(host: str, install_dir: str, data_dir: str, log_dir: str) -> s
 def _linux_service(host: str, install_dir: str, data_dir: str, log_dir: str) -> str:
     return dedent(
         f"""
-        ## Linux Service Install (systemd)
+        ## Linux Service Install (systemd, Idempotent)
 
         ```bash
         set -euo pipefail
 
-        sudo tee /etc/systemd/system/rustdesk-hbbs.service >/dev/null <<'UNIT'
+        HBBS_UNIT="/etc/systemd/system/rustdesk-hbbs.service"
+        HBBR_UNIT="/etc/systemd/system/rustdesk-hbbr.service"
+
+        if [ ! -f "$HBBS_UNIT" ]; then
+          sudo tee "$HBBS_UNIT" >/dev/null <<'UNIT'
         [Unit]
         Description=RustDesk HBBS
         After=network.target
@@ -160,8 +209,13 @@ def _linux_service(host: str, install_dir: str, data_dir: str, log_dir: str) -> 
         [Install]
         WantedBy=multi-user.target
         UNIT
+          echo "[OK] Created $HBBS_UNIT"
+        else
+          echo "[SKIP] $HBBS_UNIT already exists"
+        fi
 
-        sudo tee /etc/systemd/system/rustdesk-hbbr.service >/dev/null <<'UNIT'
+        if [ ! -f "$HBBR_UNIT" ]; then
+          sudo tee "$HBBR_UNIT" >/dev/null <<'UNIT'
         [Unit]
         Description=RustDesk HBBR
         After=network.target
@@ -179,9 +233,32 @@ def _linux_service(host: str, install_dir: str, data_dir: str, log_dir: str) -> 
         [Install]
         WantedBy=multi-user.target
         UNIT
+          echo "[OK] Created $HBBR_UNIT"
+        else
+          echo "[SKIP] $HBBR_UNIT already exists"
+        fi
 
         sudo systemctl daemon-reload
-        sudo systemctl enable --now rustdesk-hbbs rustdesk-hbbr
+
+        if ! sudo systemctl is-enabled --quiet rustdesk-hbbs; then
+          sudo systemctl enable rustdesk-hbbs
+        fi
+        if ! sudo systemctl is-enabled --quiet rustdesk-hbbr; then
+          sudo systemctl enable rustdesk-hbbr
+        fi
+
+        if sudo systemctl is-active --quiet rustdesk-hbbs; then
+          sudo systemctl restart rustdesk-hbbs
+        else
+          sudo systemctl start rustdesk-hbbs
+        fi
+
+        if sudo systemctl is-active --quiet rustdesk-hbbr; then
+          sudo systemctl restart rustdesk-hbbr
+        else
+          sudo systemctl start rustdesk-hbbr
+        fi
+
         sudo systemctl status rustdesk-hbbs --no-pager
         sudo systemctl status rustdesk-hbbr --no-pager
         ```
@@ -192,13 +269,16 @@ def _linux_service(host: str, install_dir: str, data_dir: str, log_dir: str) -> 
 def _linux_log_limits(log_dir: str) -> str:
     return dedent(
         f"""
-        ## Linux Log Limits
+        ## Linux Log Limits (Idempotent)
 
         ```bash
         set -euo pipefail
 
-        # 1) Rotate RustDesk file logs
-        sudo tee /etc/logrotate.d/rustdesk-server >/dev/null <<'CONF'
+        LOGROTATE_FILE="/etc/logrotate.d/rustdesk-server"
+        JOURNALD_FILE="/etc/systemd/journald.conf.d/rustdesk.conf"
+
+        if [ ! -f "$LOGROTATE_FILE" ]; then
+          sudo tee "$LOGROTATE_FILE" >/dev/null <<'CONF'
         {log_dir}/*.log {{
             daily
             rotate 14
@@ -210,27 +290,36 @@ def _linux_log_limits(log_dir: str) -> str:
             copytruncate
         }}
         CONF
+          echo "[OK] Created $LOGROTATE_FILE"
+        else
+          echo "[SKIP] $LOGROTATE_FILE already exists"
+        fi
 
-        # 2) Limit journald usage to avoid disk exhaustion
         sudo install -d /etc/systemd/journald.conf.d
-        sudo tee /etc/systemd/journald.conf.d/rustdesk.conf >/dev/null <<'CONF'
+        if [ ! -f "$JOURNALD_FILE" ]; then
+          sudo tee "$JOURNALD_FILE" >/dev/null <<'CONF'
         [Journal]
         SystemMaxUse=500M
         RuntimeMaxUse=200M
         MaxRetentionSec=14day
         CONF
+          echo "[OK] Created $JOURNALD_FILE"
+        else
+          echo "[SKIP] $JOURNALD_FILE already exists"
+        fi
 
         sudo systemctl restart systemd-journald
-        sudo logrotate -f /etc/logrotate.d/rustdesk-server
+        sudo logrotate -f "$LOGROTATE_FILE" || true
         ```
         """
     ).strip()
 
 
 def _windows_deploy(host: str, windows_dir: str) -> str:
+    _ = host
     return dedent(
         f"""
-        ## Windows CLI Deploy (PowerShell)
+        ## Windows CLI Deploy (PowerShell, Idempotent)
 
         ```powershell
         $ErrorActionPreference = "Stop"
@@ -239,26 +328,40 @@ def _windows_deploy(host: str, windows_dir: str) -> str:
         $Bin = Join-Path $Root "bin"
         $Data = Join-Path $Root "data"
         $Logs = Join-Path $Root "logs"
+        $ForceReinstall = ($env:FORCE_REINSTALL -eq "1")
 
         New-Item -ItemType Directory -Force -Path $Bin, $Data, $Logs | Out-Null
 
+        $HbbsExe = Join-Path $Bin "hbbs.exe"
+        $HbbrExe = Join-Path $Bin "hbbr.exe"
+
+        if ((Test-Path $HbbsExe) -and (Test-Path $HbbrExe)) {{
+            Write-Host "[SKIP] RustDesk binaries already exist at $Bin"
+            return
+        }}
+
+        if (-not $ForceReinstall -and ((Test-Path $HbbsExe) -or (Test-Path $HbbrExe))) {{
+            throw "[STOP] Partial install detected. Set FORCE_REINSTALL=1 before rerunning."
+        }}
+
         $Tag = (Invoke-RestMethod "https://api.github.com/repos/rustdesk/rustdesk-server/releases/latest").tag_name
         $ZipPath = Join-Path $env:TEMP "rustdesk-server.zip"
+        if (Test-Path $ZipPath) {{ Remove-Item $ZipPath -Force }}
 
         Invoke-WebRequest -Uri "https://github.com/rustdesk/rustdesk-server/releases/download/$Tag/rustdesk-server-windows-x64.zip" -OutFile $ZipPath
         Expand-Archive -Path $ZipPath -DestinationPath $Bin -Force
 
-        # Move binaries up if they are in a nested folder
         $hbbs = Get-ChildItem -Path $Bin -Filter hbbs.exe -Recurse | Select-Object -First 1
         $hbbr = Get-ChildItem -Path $Bin -Filter hbbr.exe -Recurse | Select-Object -First 1
-        Copy-Item $hbbs.FullName (Join-Path $Bin "hbbs.exe") -Force
-        Copy-Item $hbbr.FullName (Join-Path $Bin "hbbr.exe") -Force
 
-        Write-Host "Binary deploy prepared. Next: install service manager (PM2 or NSSM)."
+        if (-not $hbbs -or -not $hbbr) {{
+            throw "[STOP] hbbs.exe or hbbr.exe not found after extraction."
+        }}
+
+        Copy-Item $hbbs.FullName $HbbsExe -Force
+        Copy-Item $hbbr.FullName $HbbrExe -Force
+        Write-Host "[OK] Binaries installed into $Bin"
         ```
-
-        GUI-friendly option:
-        - Run this app with `--gui`, pick `windows + deploy`, then copy/export commands.
         """
     ).strip()
 
@@ -266,30 +369,63 @@ def _windows_deploy(host: str, windows_dir: str) -> str:
 def _windows_service(host: str, windows_dir: str) -> str:
     return dedent(
         f"""
-        ## Windows Service Install (PM2)
+        ## Windows Service Install (PM2, Idempotent)
 
         ```powershell
         $ErrorActionPreference = "Stop"
 
-        # 1) Install Node.js LTS and PM2 stack
-        winget install OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements
-        npm install -g pm2 pm2-windows-startup pm2-logrotate
-        pm2-startup install
+        function Test-Command([string]$Name) {{
+            return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
+        }}
 
-        # 2) Start RustDesk processes under PM2
+        if (-not (Test-Command "node")) {{
+            if (-not (Test-Command "winget")) {{
+                throw "[STOP] Node.js is missing and winget is not available. Install Node.js LTS manually first."
+            }}
+            winget install OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements
+        }}
+
+        if (-not (Test-Command "pm2")) {{
+            npm install -g pm2 pm2-windows-startup pm2-logrotate
+        }}
+
+        if (Test-Command "pm2-startup") {{
+            pm2-startup install
+        }}
+
+        function Test-Pm2Process([string]$Name) {{
+            try {{
+                $items = pm2 jlist | ConvertFrom-Json
+                foreach ($item in $items) {{
+                    if ($item.name -eq $Name) {{ return $true }}
+                }}
+                return $false
+            }} catch {{
+                return $false
+            }}
+        }}
+
         $Bin = Join-Path "{windows_dir}" "bin"
-        $Data = Join-Path "{windows_dir}" "data"
-
         Set-Location $Bin
-        pm2 start .\\hbbs.exe --name rustdesk-hbbs -- -r {host}:21117
-        pm2 start .\\hbbr.exe --name rustdesk-hbbr
 
-        # 3) Persist startup
+        if (Test-Pm2Process "rustdesk-hbbs") {{
+            Write-Host "[SKIP] PM2 process rustdesk-hbbs already exists"
+        }} else {{
+            pm2 start .\\hbbs.exe --name rustdesk-hbbs -- -r {host}:21117
+        }}
+
+        if (Test-Pm2Process "rustdesk-hbbr") {{
+            Write-Host "[SKIP] PM2 process rustdesk-hbbr already exists"
+        }} else {{
+            pm2 start .\\hbbr.exe --name rustdesk-hbbr
+        }}
+
         pm2 save
+        pm2 list
         ```
 
         Alternative GUI-style service install (NSSM):
-        - Run `nssm install` to open the GUI wizard and register `hbbs.exe` / `hbbr.exe`.
+        - Run `nssm install` to open GUI and register `hbbs.exe` / `hbbr.exe`.
         - In NSSM I/O tab, point stdout/stderr to `{windows_dir}\\logs\\*.log`.
         """
     ).strip()
@@ -298,20 +434,37 @@ def _windows_service(host: str, windows_dir: str) -> str:
 def _windows_log_limits() -> str:
     return dedent(
         """
-        ## Windows Log Limits
+        ## Windows Log Limits (Idempotent)
 
         ```powershell
-        # PM2 log rotation (recommended with PM2 service mode)
-        pm2 install pm2-logrotate
+        $ErrorActionPreference = "Stop"
+
+        if (-not (Get-Command pm2 -ErrorAction SilentlyContinue)) {
+            throw "[STOP] pm2 is not installed. Apply service setup first."
+        }
+
+        $hasLogRotate = $false
+        try {
+            $null = pm2 conf pm2-logrotate:max_size 2>$null
+            if ($LASTEXITCODE -eq 0) { $hasLogRotate = $true }
+        } catch {
+            $hasLogRotate = $false
+        }
+
+        if (-not $hasLogRotate) {
+            pm2 install pm2-logrotate
+        } else {
+            Write-Host "[SKIP] pm2-logrotate already installed"
+        }
+
         pm2 set pm2-logrotate:max_size 50M
         pm2 set pm2-logrotate:retain 14
         pm2 set pm2-logrotate:compress true
         pm2 save
 
-        # Check PM2 process and logs
         pm2 list
-        pm2 logs rustdesk-hbbs --lines 100
-        pm2 logs rustdesk-hbbr --lines 100
+        pm2 logs rustdesk-hbbs --lines 50
+        pm2 logs rustdesk-hbbr --lines 50
         ```
 
         If using NSSM instead of PM2:
@@ -320,68 +473,365 @@ def _windows_log_limits() -> str:
     ).strip()
 
 
-def _windows_to_linux_migration(windows_dir: str, linux_data_dir: str) -> str:
-    return dedent(
+def _migration_guide(
+    source_os: str,
+    target_os: str,
+    source_windows_dir: str,
+    target_windows_dir: str,
+    source_linux_data_dir: str,
+    target_linux_data_dir: str,
+) -> str:
+    pair = (source_os, target_os)
+    if pair == ("windows", "linux"):
+        return _migration_windows_to_linux(
+            source_windows_dir=source_windows_dir,
+            target_linux_data_dir=target_linux_data_dir,
+        )
+    if pair == ("linux", "windows"):
+        return _migration_linux_to_windows(
+            source_linux_data_dir=source_linux_data_dir,
+            target_windows_dir=target_windows_dir,
+        )
+    if pair == ("linux", "linux"):
+        return _migration_linux_to_linux(
+            source_linux_data_dir=source_linux_data_dir,
+            target_linux_data_dir=target_linux_data_dir,
+        )
+    if pair == ("windows", "windows"):
+        return _migration_windows_to_windows(
+            source_windows_dir=source_windows_dir,
+            target_windows_dir=target_windows_dir,
+        )
+    raise ValueError(f"Unsupported migration pair: {source_os} -> {target_os}")
+
+
+def _migration_windows_to_linux(source_windows_dir: str, target_linux_data_dir: str) -> str:
+    body = dedent(
         f"""
-        ## Migration: Windows Server -> Linux Server
+        ## Migration: Windows -> Linux (Guided + Idempotent)
 
-        Goal:
-        - Preserve server identity and clients by migrating key files first.
-
-        Step 1: Stop old Windows services/processes
+        Step 1: Stop source services on Windows
         ```powershell
-        pm2 stop rustdesk-hbbs
-        pm2 stop rustdesk-hbbr
-        # Or stop NSSM services from services.msc / nssm stop <service>
+        pm2 stop rustdesk-hbbs 2>$null
+        pm2 stop rustdesk-hbbr 2>$null
+        # Or stop NSSM services if PM2 is not used.
         ```
 
-        Step 2: Backup critical files from old Windows host
+        Step 2: Build source backup package on Windows
         ```powershell
-        $DataDir = Join-Path "{windows_dir}" "data"
-        $Backup = "C:\\rustdesk-migration-backup"
-        New-Item -ItemType Directory -Force -Path $Backup | Out-Null
+        $SourceData = Join-Path "{source_windows_dir}" "data"
+        $BackupRoot = "C:\\rustdesk-migration-backup"
+        $Bundle = Join-Path $BackupRoot "bundle"
+        $Zip = Join-Path $BackupRoot "rustdesk-migration-backup.zip"
 
-        Copy-Item (Join-Path $DataDir "id_ed25519") $Backup -Force -ErrorAction SilentlyContinue
-        Copy-Item (Join-Path $DataDir "id_ed25519.pub") $Backup -Force -ErrorAction SilentlyContinue
-        Copy-Item (Join-Path $DataDir "db_v2.sqlite3*") $Backup -Force -ErrorAction SilentlyContinue
-        Copy-Item (Join-Path $DataDir "db.sqlite3*") $Backup -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force -Path $Bundle | Out-Null
+        if (Test-Path $Zip) {{ Remove-Item $Zip -Force }}
+
+        $Patterns = @("id_ed25519", "id_ed25519.pub", "db_v2.sqlite3*", "db.sqlite3*")
+        foreach ($Pattern in $Patterns) {{
+            Get-ChildItem -Path (Join-Path $SourceData $Pattern) -ErrorAction SilentlyContinue |
+                Copy-Item -Destination $Bundle -Force
+        }}
+
+        if (-not (Get-ChildItem -Path $Bundle -File -ErrorAction SilentlyContinue)) {{
+            throw "[STOP] No migration files found under $SourceData"
+        }}
+
+        Compress-Archive -Path (Join-Path $Bundle "*") -DestinationPath $Zip -Force
+        Write-Host "[OK] Backup package created: $Zip"
         ```
 
-        Step 3: Copy backup package to Linux host (SCP/WinSCP)
+        Step 3: Transfer package to Linux target
         ```bash
-        # run on Windows terminal if OpenSSH client is installed
-        scp -r C:/rustdesk-migration-backup user@<LINUX_HOST_IP>:/tmp/rustdesk-migration-backup
+        scp C:/rustdesk-migration-backup/rustdesk-migration-backup.zip user@<TARGET_LINUX_HOST>:/tmp/
         ```
 
-        Step 4: Restore files on Linux
+        Step 4: Restore on Linux target (overwrite-protected)
         ```bash
         set -euo pipefail
-        sudo install -d -m 0755 {linux_data_dir}
-        sudo cp -av /tmp/rustdesk-migration-backup/* {linux_data_dir}/
 
-        sudo chown root:root {linux_data_dir}/id_ed25519 {linux_data_dir}/id_ed25519.pub || true
-        sudo chmod 600 {linux_data_dir}/id_ed25519 || true
-        sudo chmod 644 {linux_data_dir}/id_ed25519.pub || true
+        TARGET_DATA_DIR="{target_linux_data_dir}"
+        ARCHIVE="/tmp/rustdesk-migration-backup.zip"
+        ALLOW_OVERWRITE="${{ALLOW_OVERWRITE:-0}}"
 
-        # If WAL files exist, keep ownership consistent
-        sudo chown root:root {linux_data_dir}/db*.sqlite3* || true
+        [ -f "$ARCHIVE" ] || {{ echo "[STOP] $ARCHIVE not found"; exit 1; }}
+
+        if [ "$ALLOW_OVERWRITE" != "1" ] && {{ [ -f "$TARGET_DATA_DIR/id_ed25519" ] || [ -f "$TARGET_DATA_DIR/id_ed25519.pub" ]; }}; then
+          echo "[STOP] Destination keys exist. Set ALLOW_OVERWRITE=1 to replace."
+          exit 1
+        fi
+
+        sudo install -d -m 0755 "$TARGET_DATA_DIR"
+        TMPDIR=$(mktemp -d)
+        trap 'rm -rf "$TMPDIR"' EXIT
+        unzip -o "$ARCHIVE" -d "$TMPDIR"
+        sudo cp -av "$TMPDIR"/* "$TARGET_DATA_DIR"/
+
+        sudo chown root:root "$TARGET_DATA_DIR"/id_ed25519 "$TARGET_DATA_DIR"/id_ed25519.pub 2>/dev/null || true
+        sudo chmod 600 "$TARGET_DATA_DIR"/id_ed25519 2>/dev/null || true
+        sudo chmod 644 "$TARGET_DATA_DIR"/id_ed25519.pub 2>/dev/null || true
+        sudo chown root:root "$TARGET_DATA_DIR"/db*.sqlite3* 2>/dev/null || true
+
+        echo "[OK] Restore completed"
         ```
 
-        Step 5: Start Linux services and verify key consistency
+        Step 5: Start Linux services
         ```bash
         sudo systemctl restart rustdesk-hbbs rustdesk-hbbr
         sudo systemctl status rustdesk-hbbs --no-pager
         sudo systemctl status rustdesk-hbbr --no-pager
+        ```
+        """
+    ).strip()
+    return f"{body}\n\n{_migration_checklist()}"
 
-        # Verify public key used by new server
-        cat {linux_data_dir}/id_ed25519.pub
+
+def _migration_linux_to_windows(source_linux_data_dir: str, target_windows_dir: str) -> str:
+    body = dedent(
+        f"""
+        ## Migration: Linux -> Windows (Guided + Idempotent)
+
+        Step 1: Stop source services on Linux
+        ```bash
+        sudo systemctl stop rustdesk-hbbs rustdesk-hbbr
         ```
 
+        Step 2: Build source backup package on Linux
+        ```bash
+        set -euo pipefail
+
+        SOURCE_DATA_DIR="{source_linux_data_dir}"
+        BACKUP_DIR="/tmp/rustdesk-migration-backup"
+        ARCHIVE="/tmp/rustdesk-migration-backup.tgz"
+
+        rm -rf "$BACKUP_DIR"
+        mkdir -p "$BACKUP_DIR"
+
+        for f in id_ed25519 id_ed25519.pub; do
+          [ -f "$SOURCE_DATA_DIR/$f" ] && cp -a "$SOURCE_DATA_DIR/$f" "$BACKUP_DIR/"
+        done
+
+        shopt -s nullglob
+        for f in "$SOURCE_DATA_DIR"/db_v2.sqlite3* "$SOURCE_DATA_DIR"/db.sqlite3*; do
+          cp -a "$f" "$BACKUP_DIR/"
+        done
+        shopt -u nullglob
+
+        if ! ls -A "$BACKUP_DIR" >/dev/null 2>&1; then
+          echo "[STOP] No migration files found under $SOURCE_DATA_DIR"
+          exit 1
+        fi
+
+        tar -C "$BACKUP_DIR" -czf "$ARCHIVE" .
+        echo "[OK] Backup package created: $ARCHIVE"
+        ```
+
+        Step 3: Transfer package to Windows target
+        ```bash
+        scp /tmp/rustdesk-migration-backup.tgz Administrator@<TARGET_WINDOWS_HOST>:C:/rustdesk-migration-backup/
+        ```
+
+        Step 4: Restore on Windows target (overwrite-protected)
+        ```powershell
+        $ErrorActionPreference = "Stop"
+
+        $TargetData = Join-Path "{target_windows_dir}" "data"
+        $Archive = "C:\\rustdesk-migration-backup\\rustdesk-migration-backup.tgz"
+        $AllowOverwrite = ($env:ALLOW_OVERWRITE -eq "1")
+
+        if (-not (Test-Path $Archive)) {{
+            throw "[STOP] Archive not found: $Archive"
+        }}
+
+        New-Item -ItemType Directory -Force -Path $TargetData | Out-Null
+
+        if (-not $AllowOverwrite -and ((Test-Path (Join-Path $TargetData "id_ed25519")) -or (Test-Path (Join-Path $TargetData "id_ed25519.pub")))) {{
+            throw "[STOP] Destination keys already exist. Set ALLOW_OVERWRITE=1 to replace."
+        }}
+
+        tar -xzf $Archive -C $TargetData
+        Write-Host "[OK] Restore completed"
+        ```
+
+        Step 5: Start Windows services
+        ```powershell
+        pm2 start rustdesk-hbbs 2>$null
+        pm2 start rustdesk-hbbr 2>$null
+        # Or start NSSM services if PM2 is not used.
+        ```
+        """
+    ).strip()
+    return f"{body}\n\n{_migration_checklist()}"
+
+
+def _migration_linux_to_linux(source_linux_data_dir: str, target_linux_data_dir: str) -> str:
+    body = dedent(
+        f"""
+        ## Migration: Linux -> Linux (Guided + Idempotent)
+
+        Step 1: Stop source services
+        ```bash
+        sudo systemctl stop rustdesk-hbbs rustdesk-hbbr
+        ```
+
+        Step 2: Build source backup package
+        ```bash
+        set -euo pipefail
+
+        SOURCE_DATA_DIR="{source_linux_data_dir}"
+        BACKUP_DIR="/tmp/rustdesk-migration-backup"
+        ARCHIVE="/tmp/rustdesk-migration-backup.tgz"
+
+        rm -rf "$BACKUP_DIR"
+        mkdir -p "$BACKUP_DIR"
+
+        for f in id_ed25519 id_ed25519.pub; do
+          [ -f "$SOURCE_DATA_DIR/$f" ] && cp -a "$SOURCE_DATA_DIR/$f" "$BACKUP_DIR/"
+        done
+
+        shopt -s nullglob
+        for f in "$SOURCE_DATA_DIR"/db_v2.sqlite3* "$SOURCE_DATA_DIR"/db.sqlite3*; do
+          cp -a "$f" "$BACKUP_DIR/"
+        done
+        shopt -u nullglob
+
+        if ! ls -A "$BACKUP_DIR" >/dev/null 2>&1; then
+          echo "[STOP] No migration files found under $SOURCE_DATA_DIR"
+          exit 1
+        fi
+
+        tar -C "$BACKUP_DIR" -czf "$ARCHIVE" .
+        echo "[OK] Backup package created: $ARCHIVE"
+        ```
+
+        Step 3: Transfer package to target Linux
+        ```bash
+        scp /tmp/rustdesk-migration-backup.tgz user@<TARGET_LINUX_HOST>:/tmp/
+        ```
+
+        Step 4: Restore on target Linux (overwrite-protected)
+        ```bash
+        set -euo pipefail
+
+        TARGET_DATA_DIR="{target_linux_data_dir}"
+        ARCHIVE="/tmp/rustdesk-migration-backup.tgz"
+        ALLOW_OVERWRITE="${{ALLOW_OVERWRITE:-0}}"
+
+        [ -f "$ARCHIVE" ] || {{ echo "[STOP] $ARCHIVE not found"; exit 1; }}
+
+        if [ "$ALLOW_OVERWRITE" != "1" ] && {{ [ -f "$TARGET_DATA_DIR/id_ed25519" ] || [ -f "$TARGET_DATA_DIR/id_ed25519.pub" ]; }}; then
+          echo "[STOP] Destination keys exist. Set ALLOW_OVERWRITE=1 to replace."
+          exit 1
+        fi
+
+        sudo install -d -m 0755 "$TARGET_DATA_DIR"
+        sudo tar -C "$TARGET_DATA_DIR" -xzf "$ARCHIVE"
+
+        sudo chown root:root "$TARGET_DATA_DIR"/id_ed25519 "$TARGET_DATA_DIR"/id_ed25519.pub 2>/dev/null || true
+        sudo chmod 600 "$TARGET_DATA_DIR"/id_ed25519 2>/dev/null || true
+        sudo chmod 644 "$TARGET_DATA_DIR"/id_ed25519.pub 2>/dev/null || true
+        sudo chown root:root "$TARGET_DATA_DIR"/db*.sqlite3* 2>/dev/null || true
+
+        echo "[OK] Restore completed"
+        ```
+
+        Step 5: Start target services
+        ```bash
+        sudo systemctl restart rustdesk-hbbs rustdesk-hbbr
+        sudo systemctl status rustdesk-hbbs --no-pager
+        sudo systemctl status rustdesk-hbbr --no-pager
+        ```
+        """
+    ).strip()
+    return f"{body}\n\n{_migration_checklist()}"
+
+
+def _migration_windows_to_windows(source_windows_dir: str, target_windows_dir: str) -> str:
+    body = dedent(
+        f"""
+        ## Migration: Windows -> Windows (Guided + Idempotent)
+
+        Step 1: Stop source services
+        ```powershell
+        pm2 stop rustdesk-hbbs 2>$null
+        pm2 stop rustdesk-hbbr 2>$null
+        # Or stop NSSM services if PM2 is not used.
+        ```
+
+        Step 2: Build source backup package
+        ```powershell
+        $SourceData = Join-Path "{source_windows_dir}" "data"
+        $BackupRoot = "C:\\rustdesk-migration-backup"
+        $Bundle = Join-Path $BackupRoot "bundle"
+        $Zip = Join-Path $BackupRoot "rustdesk-migration-backup.zip"
+
+        New-Item -ItemType Directory -Force -Path $Bundle | Out-Null
+        if (Test-Path $Zip) {{ Remove-Item $Zip -Force }}
+
+        $Patterns = @("id_ed25519", "id_ed25519.pub", "db_v2.sqlite3*", "db.sqlite3*")
+        foreach ($Pattern in $Patterns) {{
+            Get-ChildItem -Path (Join-Path $SourceData $Pattern) -ErrorAction SilentlyContinue |
+                Copy-Item -Destination $Bundle -Force
+        }}
+
+        if (-not (Get-ChildItem -Path $Bundle -File -ErrorAction SilentlyContinue)) {{
+            throw "[STOP] No migration files found under $SourceData"
+        }}
+
+        Compress-Archive -Path (Join-Path $Bundle "*") -DestinationPath $Zip -Force
+        Write-Host "[OK] Backup package created: $Zip"
+        ```
+
+        Step 3: Transfer package to target Windows
+        ```powershell
+        # Option A: SMB copy
+        Copy-Item C:/rustdesk-migration-backup/rustdesk-migration-backup.zip \\\\<TARGET_WINDOWS_HOST>\\c$\\rustdesk-migration-backup\\ -Force
+
+        # Option B: SCP
+        # scp C:/rustdesk-migration-backup/rustdesk-migration-backup.zip Administrator@<TARGET_WINDOWS_HOST>:C:/rustdesk-migration-backup/
+        ```
+
+        Step 4: Restore on target Windows (overwrite-protected)
+        ```powershell
+        $ErrorActionPreference = "Stop"
+
+        $TargetData = Join-Path "{target_windows_dir}" "data"
+        $Zip = "C:\\rustdesk-migration-backup\\rustdesk-migration-backup.zip"
+        $AllowOverwrite = ($env:ALLOW_OVERWRITE -eq "1")
+
+        if (-not (Test-Path $Zip)) {{
+            throw "[STOP] Package not found: $Zip"
+        }}
+
+        New-Item -ItemType Directory -Force -Path $TargetData | Out-Null
+
+        if (-not $AllowOverwrite -and ((Test-Path (Join-Path $TargetData "id_ed25519")) -or (Test-Path (Join-Path $TargetData "id_ed25519.pub")))) {{
+            throw "[STOP] Destination keys already exist. Set ALLOW_OVERWRITE=1 to replace."
+        }}
+
+        Expand-Archive -Path $Zip -DestinationPath $TargetData -Force
+        Write-Host "[OK] Restore completed"
+        ```
+
+        Step 5: Start target services
+        ```powershell
+        pm2 start rustdesk-hbbs 2>$null
+        pm2 start rustdesk-hbbr 2>$null
+        # Or start NSSM services if PM2 is not used.
+        ```
+        """
+    ).strip()
+    return f"{body}\n\n{_migration_checklist()}"
+
+
+def _migration_checklist() -> str:
+    return dedent(
+        """
         Migration checklist:
         - Must migrate: `id_ed25519`, `id_ed25519.pub`.
         - Usually migrate: `db_v2.sqlite3` (and `-wal`, `-shm` when present).
         - Do not migrate logs unless needed for audit.
-        - Open the same ports on Linux before cutover.
+        - Keep old server stopped during cutover to avoid data divergence.
         """
     ).strip()
 
