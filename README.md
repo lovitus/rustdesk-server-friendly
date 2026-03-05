@@ -57,8 +57,24 @@ Windows PowerShell (`venv` example):
 git clone https://github.com/lovitus/rustdesk-server-friendly.git
 cd rustdesk-server-friendly
 py -3 -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install -e .
+.\.venv\Scripts\python.exe -m pip install -U pip setuptools wheel
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\rustdesk-friendly.exe
+```
+
+Windows PowerShell (recommended, no `Activate.ps1`, avoids prompt function conflict):
+
+```powershell
+git clone https://github.com/lovitus/rustdesk-server-friendly.git
+cd rustdesk-server-friendly
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1
+.\.venv\Scripts\rustdesk-friendly.exe
+```
+
+If you already have a broken `.venv` (for example `WinError 183`), run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1 -ResetVenv
 ```
 
 If you do not want to install command entrypoints, you can run directly:
