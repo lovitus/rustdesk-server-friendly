@@ -26,13 +26,50 @@ Self-hosting RustDesk is easy to start but often hard to standardize:
 
 This tool makes those steps repeatable and exportable.
 
-## Quick start
+## Installation
+
+Prerequisites:
+
+- Python 3.9+
+- Git
+
+Option A (recommended, isolated CLI install with `pipx`):
 
 ```bash
+git clone https://github.com/lovitus/rustdesk-server-friendly.git
+cd rustdesk-server-friendly
+pipx install .
+```
+
+Option B (virtual environment):
+
+```bash
+git clone https://github.com/lovitus/rustdesk-server-friendly.git
+cd rustdesk-server-friendly
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+```
 
+Windows PowerShell (`venv` example):
+
+```powershell
+git clone https://github.com/lovitus/rustdesk-server-friendly.git
+cd rustdesk-server-friendly
+py -3 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -e .
+```
+
+If you do not want to install command entrypoints, you can run directly:
+
+```bash
+python -m rustdesk_server_friendly
+```
+
+## Quick start
+
+```bash
 # one-line interactive wizard (recommended)
 rustdesk-friendly
 
