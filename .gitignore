@@ -1,7 +1,16 @@
+# Build outputs
+dist/
+release/
+rustdesk-friendly
+rustdesk-friendly.exe
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Legacy Python artifacts
 __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
-dist/
-build/
 *.egg-info/

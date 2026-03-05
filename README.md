@@ -1,167 +1,114 @@
-# rustdesk-server-friendly
+# rustdesk-server-friendly (Go)
 
-A practical helper app for RustDesk self-hosting with:
+A Go-based CLI for generating RustDesk self-host runbooks with:
 
-- one-line interactive CLI wizard (no parameter memorization)
-- auto-detect paths from running service/PM2/NSSM config
-- multi-channel pull steps (`wget`/`curl` on Linux, `Invoke-WebRequest`/`curl.exe`/`gh+winget` on Windows)
-- Linux and Windows command generation
-- desktop GUI for non-CLI operators
-- log size and retention limits (avoid disk-full incidents)
-- service installation instructions (systemd / PM2 / NSSM)
-- guided migration checklists and commands for all pairs:
+- one-line interactive wizard (`rustdesk-friendly`)
+- idempotent deploy/service/log scripts (`[SKIP]` / `[STOP]` guards)
+- migration guides for all pairs:
   - Linux -> Linux
   - Linux -> Windows
   - Windows -> Linux
   - Windows -> Windows
+- auto-detection hints for runtime data paths (service/PM2/NSSM)
+- multiple download methods:
+  - Linux: `wget` / `curl`
+  - Windows: `Invoke-WebRequest` / `curl.exe` / `gh` (install via `winget`)
 
-## Why this project
+## Install (Prebuilt Binary)
 
-Self-hosting RustDesk is easy to start but often hard to standardize:
+### Linux
 
-- people do not know which binaries to install
-- service setup differs by OS
-- logs may fill the disk if not rotated
-- migration is risky without a clear file checklist
+```bash
+# latest release, auto choose curl/wget
+bash <(curl -fsSL https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_linux_binary.sh)
 
-This tool makes those steps repeatable and exportable.
+# or pin a release tag
+bash <(curl -fsSL https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_linux_binary.sh) v1.0.0
+```
 
-## Installation
+### Windows PowerShell
+
+```powershell
+# latest release
+powershell -ExecutionPolicy Bypass -Command "iwr -useb https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_windows_binary.ps1 | iex"
+
+# specific version
+powershell -ExecutionPolicy Bypass -File .\scripts\install_windows_binary.ps1 -Version v1.0.0
+```
+
+## Build From Source
 
 Prerequisites:
 
-- Python 3.9+
+- Go 1.26+
 - Git
 
-Option A (recommended, isolated CLI install with `pipx`):
-
 ```bash
 git clone https://github.com/lovitus/rustdesk-server-friendly.git
 cd rustdesk-server-friendly
-pipx install .
+go build -o rustdesk-friendly ./cmd/rustdesk-friendly
+./rustdesk-friendly version
 ```
 
-Option B (virtual environment):
-
-```bash
-git clone https://github.com/lovitus/rustdesk-server-friendly.git
-cd rustdesk-server-friendly
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
-
-Windows PowerShell (`venv` example):
+Windows:
 
 ```powershell
 git clone https://github.com/lovitus/rustdesk-server-friendly.git
 cd rustdesk-server-friendly
-py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -U pip setuptools wheel
-.\.venv\Scripts\python.exe -m pip install -e .
-.\.venv\Scripts\rustdesk-friendly.exe
+go build -o rustdesk-friendly.exe .\cmd\rustdesk-friendly
+.\rustdesk-friendly.exe version
 ```
 
-Windows PowerShell (recommended, no `Activate.ps1`, avoids prompt function conflict):
-
-```powershell
-git clone https://github.com/lovitus/rustdesk-server-friendly.git
-cd rustdesk-server-friendly
-powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1
-.\.venv\Scripts\rustdesk-friendly.exe
-```
-
-If you already have a broken `.venv` (for example `WinError 183`), run:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1 -ResetVenv
-```
-
-If you do not want to install command entrypoints, you can run directly:
+## Usage
 
 ```bash
-python -m rustdesk_server_friendly
-```
-
-## Quick start
-
-```bash
-# one-line interactive wizard (recommended)
+# interactive wizard (recommended)
 rustdesk-friendly
 
-# explicit wizard command
-rustdesk-friendly wizard
+# explicit wizard
+rustdesk-friendly wizard --output docs/runbook.md
 
-# direct non-interactive generation (optional)
+# non-interactive guide generation
 rustdesk-friendly guide --target linux --topic all --host rustdesk.example.com
-```
 
-## CLI modes
-
-1. `wizard` (recommended)
-- asks questions interactively
-- exports runbook to markdown
-- no need to remember parameters
-- defaults to auto-detecting source/target data directories from running services
-
-2. `guide`
-- deterministic output for automation/CI
-- supports explicit migration pair selection
-- supports pinned version and download integrity env vars in generated scripts (`RUSTDESK_RELEASE_TAG`, `RUSTDESK_ZIP_SHA256`)
-
-Examples:
-
-```bash
-# Migration Linux -> Windows
+# migration example: linux -> windows
 rustdesk-friendly guide \
   --target cross \
   --topic migrate \
   --migration-source linux \
   --migration-target windows \
-  --source-linux-data-dir /var/lib/rustdesk-server \
-  --target-windows-dir "C:\\RustDesk-Server" \
   --output docs/linux-to-windows.md
-
-# Migration Windows -> Windows
-rustdesk-friendly guide \
-  --target cross \
-  --topic migrate \
-  --migration-source windows \
-  --migration-target windows \
-  --source-windows-dir "C:\\Old-RustDesk" \
-  --target-windows-dir "D:\\RustDesk-Server" \
-  --output docs/windows-to-windows.md
 ```
 
-## Idempotent behavior
+## Quality Controls in Generated Scripts
 
-Generated scripts include explicit guards to avoid accidental overwrite:
+- install conflict protection: `FORCE_REINSTALL=1`
+- migration overwrite protection: `ALLOW_OVERWRITE=1`
+- optional release pin: `RUSTDESK_RELEASE_TAG`
+- optional archive hash check: `RUSTDESK_ZIP_SHA256`
+- path override fallback: `RUSTDESK_SOURCE_DATA_DIR`, `RUSTDESK_TARGET_DATA_DIR`
 
-- `[SKIP]` when binaries/configs/services already exist
-- `[STOP]` when partial/conflicting state is detected
-- `FORCE_REINSTALL=1` and `ALLOW_OVERWRITE=1` as explicit opt-in switches
-- `RUSTDESK_SOURCE_DATA_DIR` / `RUSTDESK_TARGET_DATA_DIR` for manual override when auto-detection is wrong
-- post-apply checks (service state + port listening tests) for operator confidence
-
-## GUI mode
+## Test
 
 ```bash
-rustdesk-friendly gui
+go test ./...
 ```
 
-If your Python build has no `tkinter` (common on minimal Linux/macOS builds), CLI still works and GUI will print a clear dependency message.
+## Release Assets
 
-## Verification
+Published binaries follow these names:
 
-```bash
-pytest -q
-```
+- `rustdesk-friendly-linux-amd64`
+- `rustdesk-friendly-linux-arm64`
+- `rustdesk-friendly-windows-amd64.exe`
+- `rustdesk-friendly-darwin-amd64`
+- `rustdesk-friendly-darwin-arm64`
 
-## Sources used for command design
+## Sources
 
-- [RustDesk OSS server repository](https://github.com/rustdesk/rustdesk-server)
-- [RustDesk Windows self-host docs](https://rustdesk.com/docs/en/self-host/rustdesk-server-oss/windows/)
-- [RustDesk Pro convert-from-OSS script](https://raw.githubusercontent.com/rustdesk/rustdesk-server-pro/main/convertfromos.sh)
+- https://github.com/rustdesk/rustdesk-server
+- https://rustdesk.com/docs/en/self-host/rustdesk-server-oss/windows/
+- https://raw.githubusercontent.com/rustdesk/rustdesk-server-pro/main/convertfromos.sh
 
 ## License
 
