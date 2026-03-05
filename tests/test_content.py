@@ -9,6 +9,9 @@ def test_linux_all_contains_required_sections_and_idempotent_markers() -> None:
     assert "example.com:21117" in output
     assert "[SKIP]" in output
     assert "[STOP]" in output
+    assert "DOWNLOAD_TOOL" in output
+    assert "wget" in output
+    assert "RUSTDESK_ZIP_SHA256" in output
 
 
 def test_windows_all_contains_pm2_and_idempotent_markers() -> None:
@@ -16,6 +19,9 @@ def test_windows_all_contains_pm2_and_idempotent_markers() -> None:
     assert "Windows Service Install (PM2, Idempotent)" in output
     assert "pm2 start" in output
     assert "[SKIP]" in output
+    assert "winget install GitHub.cli" in output
+    assert "DOWNLOAD_METHOD" in output
+    assert "rustdesk-server-windows-x86_64-unsigned.zip" in output
 
 
 def test_cross_migration_windows_to_linux_contains_key_files() -> None:

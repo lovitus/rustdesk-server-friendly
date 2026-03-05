@@ -113,6 +113,11 @@ def _linux_deploy(host: str, install_dir: str, data_dir: str, log_dir: str) -> s
         f"""
         ## Linux CLI Deploy (Binary, Idempotent)
 
+        Pull methods (choose one if you only want download):
+        - `wget`: `wget -O rustdesk-server.zip "https://github.com/rustdesk/rustdesk-server/releases/download/<TAG>/rustdesk-server-linux-amd64.zip"`
+        - `curl`: `curl -fL -o rustdesk-server.zip "https://github.com/rustdesk/rustdesk-server/releases/download/<TAG>/rustdesk-server-linux-amd64.zip"`
+        - Full script below supports `DOWNLOAD_TOOL=auto|wget|curl` and auto-fallback.
+
         ```bash
         set -euo pipefail
 
@@ -120,6 +125,61 @@ def _linux_deploy(host: str, install_dir: str, data_dir: str, log_dir: str) -> s
         DATA_DIR="{data_dir}"
         LOG_DIR="{log_dir}"
         FORCE_REINSTALL="${{FORCE_REINSTALL:-0}}"
+        DOWNLOAD_TOOL="${{DOWNLOAD_TOOL:-auto}}"  # auto|curl|wget
+        RUSTDESK_RELEASE_TAG="${{RUSTDESK_RELEASE_TAG:-}}"   # optional pin, e.g. 1.1.15
+        RUSTDESK_ZIP_SHA256="${{RUSTDESK_ZIP_SHA256:-}}"     # optional integrity check
+
+        choose_downloader() {{
+          case "$DOWNLOAD_TOOL" in
+            curl|wget) echo "$DOWNLOAD_TOOL" ;;
+            auto)
+              if command -v curl >/dev/null 2>&1; then echo curl; return; fi
+              if command -v wget >/dev/null 2>&1; then echo wget; return; fi
+              echo ""
+              ;;
+            *) echo "" ;;
+          esac
+        }}
+
+        download_to() {{
+          url="$1"
+          out="$2"
+          tool="$(choose_downloader)"
+          [ -n "$tool" ] || {{ echo "[STOP] No downloader available"; return 1; }}
+          if [ "$tool" = "curl" ]; then
+            curl -fL "$url" -o "$out"
+          else
+            wget -O "$out" "$url"
+          fi
+        }}
+
+        fetch_text() {{
+          url="$1"
+          tool="$(choose_downloader)"
+          [ -n "$tool" ] || {{ echo "[STOP] No downloader available"; return 1; }}
+          if [ "$tool" = "curl" ]; then
+            curl -fsSL "$url"
+          else
+            wget -qO- "$url"
+          fi
+        }}
+
+        verify_sha256() {{
+          file="$1"
+          expected="$2"
+          if [ -z "$expected" ]; then
+            return 0
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            echo "$expected  $file" | sha256sum -c -
+          elif command -v shasum >/dev/null 2>&1; then
+            got="$(shasum -a 256 "$file" | awk '{{print $1}}')"
+            [ "$got" = "$expected" ]
+          else
+            echo "[STOP] No sha256 tool found (need sha256sum or shasum) for integrity check."
+            return 1
+          fi
+        }}
 
         if [ -x "$INSTALL_DIR/bin/hbbs" ] && [ -x "$INSTALL_DIR/bin/hbbr" ]; then
           echo "[SKIP] RustDesk binaries already exist at $INSTALL_DIR/bin"
@@ -131,32 +191,46 @@ def _linux_deploy(host: str, install_dir: str, data_dir: str, log_dir: str) -> s
 
           if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update
-            sudo apt-get install -y curl tar unzip
+            sudo apt-get install -y curl wget unzip
           elif command -v dnf >/dev/null 2>&1; then
-            sudo dnf install -y curl tar unzip
+            sudo dnf install -y curl wget unzip
           elif command -v yum >/dev/null 2>&1; then
-            sudo yum install -y curl tar unzip
+            sudo yum install -y curl wget unzip
           else
             echo "[STOP] Supported package manager (apt/dnf/yum) not found."
             exit 1
           fi
 
+          if [ -z "$(choose_downloader)" ]; then
+            echo "[STOP] Neither curl nor wget available."
+            exit 1
+          fi
+
           sudo install -d -m 0755 "$INSTALL_DIR/bin" "$DATA_DIR" "$LOG_DIR"
 
-          TAG=$(curl -fsSL https://api.github.com/repos/rustdesk/rustdesk-server/releases/latest | awk -F '"' '/tag_name/{{print $4; exit}}')
+          RELEASE_JSON="$(fetch_text "https://api.github.com/repos/rustdesk/rustdesk-server/releases/latest")"
+          LATEST_TAG="$(printf '%s' "$RELEASE_JSON" | awk -F '"' '/"tag_name":/{{print $4; exit}}')"
+          TAG="${{RUSTDESK_RELEASE_TAG:-$LATEST_TAG}}"
+
           ARCH=$(uname -m)
           case "$ARCH" in
             x86_64) PKG_ARCH="amd64" ;;
-            aarch64|arm64) PKG_ARCH="arm64" ;;
+            aarch64|arm64) PKG_ARCH="arm64v8" ;;
             armv7l) PKG_ARCH="armv7" ;;
+            i386|i686) PKG_ARCH="i386" ;;
             *) echo "[STOP] Unsupported arch: $ARCH"; exit 1 ;;
           esac
 
+          ASSET_NAME="rustdesk-server-linux-${{PKG_ARCH}}.zip"
+          ASSET_URL="https://github.com/rustdesk/rustdesk-server/releases/download/${{TAG}}/${{ASSET_NAME}}"
+
           TMPDIR=$(mktemp -d)
           trap 'rm -rf "$TMPDIR"' EXIT
+          ZIP_PATH="$TMPDIR/rustdesk-server.zip"
 
-          curl -fL "https://github.com/rustdesk/rustdesk-server/releases/download/${{TAG}}/rustdesk-server-linux-${{PKG_ARCH}}.tar.gz" -o "$TMPDIR/rustdesk-server.tar.gz"
-          tar -xzf "$TMPDIR/rustdesk-server.tar.gz" -C "$TMPDIR"
+          download_to "$ASSET_URL" "$ZIP_PATH"
+          verify_sha256 "$ZIP_PATH" "$RUSTDESK_ZIP_SHA256"
+          unzip -q "$ZIP_PATH" -d "$TMPDIR"
 
           HBBS=$(find "$TMPDIR" -type f -name hbbs | head -n1)
           HBBR=$(find "$TMPDIR" -type f -name hbbr | head -n1)
@@ -165,6 +239,8 @@ def _linux_deploy(host: str, install_dir: str, data_dir: str, log_dir: str) -> s
           sudo install -m 0755 "$HBBS" "$INSTALL_DIR/bin/hbbs"
           sudo install -m 0755 "$HBBR" "$INSTALL_DIR/bin/hbbr"
           echo "[OK] Binaries installed into $INSTALL_DIR/bin"
+          "$INSTALL_DIR/bin/hbbs" -h >/dev/null 2>&1 || true
+          "$INSTALL_DIR/bin/hbbr" -h >/dev/null 2>&1 || true
         fi
 
         # Optional firewall setup (idempotent)
@@ -261,6 +337,7 @@ def _linux_service(host: str, install_dir: str, data_dir: str, log_dir: str) -> 
 
         sudo systemctl status rustdesk-hbbs --no-pager
         sudo systemctl status rustdesk-hbbr --no-pager
+        sudo ss -lntup | grep -E '21115|21116|21117|21118' || true
         ```
         """
     ).strip()
@@ -321,6 +398,11 @@ def _windows_deploy(host: str, windows_dir: str) -> str:
         f"""
         ## Windows CLI Deploy (PowerShell, Idempotent)
 
+        Pull methods:
+        - `Invoke-WebRequest` (default in script)
+        - `curl.exe -L` fallback
+        - `gh release download` (install `GitHub.cli` via `winget`)
+
         ```powershell
         $ErrorActionPreference = "Stop"
 
@@ -329,6 +411,10 @@ def _windows_deploy(host: str, windows_dir: str) -> str:
         $Data = Join-Path $Root "data"
         $Logs = Join-Path $Root "logs"
         $ForceReinstall = ($env:FORCE_REINSTALL -eq "1")
+        $DownloadMethod = ($env:DOWNLOAD_METHOD | ForEach-Object {{ $_.ToLower() }})  # auto|invokewebrequest|curl|gh
+        if ([string]::IsNullOrWhiteSpace($DownloadMethod)) {{ $DownloadMethod = "auto" }}
+        $PinnedTag = $env:RUSTDESK_RELEASE_TAG
+        $ExpectedSha256 = $env:RUSTDESK_ZIP_SHA256
 
         New-Item -ItemType Directory -Force -Path $Bin, $Data, $Logs | Out-Null
 
@@ -344,11 +430,72 @@ def _windows_deploy(host: str, windows_dir: str) -> str:
             throw "[STOP] Partial install detected. Set FORCE_REINSTALL=1 before rerunning."
         }}
 
-        $Tag = (Invoke-RestMethod "https://api.github.com/repos/rustdesk/rustdesk-server/releases/latest").tag_name
+        function Test-Command([string]$Name) {{
+            return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
+        }}
+
+        $Release = Invoke-RestMethod "https://api.github.com/repos/rustdesk/rustdesk-server/releases/latest"
+        $Tag = if ($PinnedTag) {{ $PinnedTag }} else {{ $Release.tag_name }}
+        $AssetName = "rustdesk-server-windows-x86_64-unsigned.zip"
+        $Asset = $Release.assets | Where-Object name -eq $AssetName | Select-Object -First 1
+        $AssetUrl = if ($Asset) {{ $Asset.browser_download_url }} else {{ "https://github.com/rustdesk/rustdesk-server/releases/download/$Tag/$AssetName" }}
+
         $ZipPath = Join-Path $env:TEMP "rustdesk-server.zip"
         if (Test-Path $ZipPath) {{ Remove-Item $ZipPath -Force }}
 
-        Invoke-WebRequest -Uri "https://github.com/rustdesk/rustdesk-server/releases/download/$Tag/rustdesk-server-windows-x64.zip" -OutFile $ZipPath
+        function Download-RustDeskZip([string]$Method, [string]$Url, [string]$TagName, [string]$OutFile) {{
+            switch ($Method) {{
+                "invokewebrequest" {{
+                    Invoke-WebRequest -Uri $Url -OutFile $OutFile
+                    return
+                }}
+                "curl" {{
+                    if (-not (Test-Command "curl.exe")) {{ throw "curl.exe not found" }}
+                    & curl.exe -fL $Url -o $OutFile
+                    return
+                }}
+                "gh" {{
+                    if (-not (Test-Command "gh")) {{
+                        if (Test-Command "winget") {{
+                            winget install GitHub.cli --accept-source-agreements --accept-package-agreements
+                        }} else {{
+                            throw "gh not found and winget unavailable"
+                        }}
+                    }}
+                    gh release download $TagName --repo rustdesk/rustdesk-server --pattern $AssetName --output $OutFile --clobber
+                    return
+                }}
+                "auto" {{
+                    try {{
+                        Invoke-WebRequest -Uri $Url -OutFile $OutFile
+                        return
+                    }} catch {{
+                        if (Test-Command "curl.exe") {{
+                            & curl.exe -fL $Url -o $OutFile
+                            return
+                        }}
+                        if (Test-Command "gh") {{
+                            gh release download $TagName --repo rustdesk/rustdesk-server --pattern $AssetName --output $OutFile --clobber
+                            return
+                        }}
+                        throw "No download method succeeded (Invoke-WebRequest/curl.exe/gh)"
+                    }}
+                }}
+                default {{
+                    throw "Unsupported DOWNLOAD_METHOD: $Method"
+                }}
+            }}
+        }}
+
+        Download-RustDeskZip -Method $DownloadMethod -Url $AssetUrl -TagName $Tag -OutFile $ZipPath
+
+        if ($ExpectedSha256) {{
+            $Actual = (Get-FileHash -Path $ZipPath -Algorithm SHA256).Hash.ToLower()
+            if ($Actual -ne $ExpectedSha256.ToLower()) {{
+                throw "[STOP] SHA256 mismatch for downloaded zip"
+            }}
+        }}
+
         Expand-Archive -Path $ZipPath -DestinationPath $Bin -Force
 
         $hbbs = Get-ChildItem -Path $Bin -Filter hbbs.exe -Recurse | Select-Object -First 1
@@ -361,6 +508,8 @@ def _windows_deploy(host: str, windows_dir: str) -> str:
         Copy-Item $hbbs.FullName $HbbsExe -Force
         Copy-Item $hbbr.FullName $HbbrExe -Force
         Write-Host "[OK] Binaries installed into $Bin"
+        & $HbbsExe --help *> $null
+        & $HbbrExe --help *> $null
         ```
         """
     ).strip()
@@ -422,6 +571,8 @@ def _windows_service(host: str, windows_dir: str) -> str:
 
         pm2 save
         pm2 list
+        Test-NetConnection -ComputerName 127.0.0.1 -Port 21116
+        Test-NetConnection -ComputerName 127.0.0.1 -Port 21117
         ```
 
         Alternative GUI-style service install (NSSM):
@@ -1112,6 +1263,7 @@ def _migration_checklist() -> str:
         - Usually migrate: `db_v2.sqlite3` (and `-wal`, `-shm` when present).
         - Do not migrate logs unless needed for audit.
         - Keep old server stopped during cutover to avoid data divergence.
+        - For professional change control, record SHA256 of backup archive before and after transfer.
         - Paths are auto-detected from running service/PM2/NSSM data first; use `RUSTDESK_SOURCE_DATA_DIR` or `RUSTDESK_TARGET_DATA_DIR` to override.
         """
     ).strip()
