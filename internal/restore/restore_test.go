@@ -39,6 +39,9 @@ func TestRunImportZipToLinuxDir(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(target, "id_ed25519")); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := os.Stat(filepath.Join(target, ".rustdesk-friendly-verification-report.json")); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestRunLiveVerifyWritesStateAndConfirmation(t *testing.T) {
@@ -68,6 +71,9 @@ func TestRunLiveVerifyWritesStateAndConfirmation(t *testing.T) {
 		t.Fatal("expected isolated validation dir")
 	}
 	if _, err := os.Stat(filepath.Join(res.IsolatedValidationDataDir, ".rustdesk-friendly-live-verify.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(res.IsolatedValidationDataDir, ".rustdesk-friendly-verification-report.json")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Run(Options{TargetOS: "linux", Archive: archive, TargetDataDir: target, ValidateOnly: true, UserConfirmedLive: true, TripleConfirmed: true}); err != nil {

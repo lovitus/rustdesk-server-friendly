@@ -27,6 +27,9 @@ func TestRunWindowsBackupFromExplicitDir(t *testing.T) {
 	if _, err := os.Stat(out); err != nil {
 		t.Fatalf("archive missing: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(tmp, "rustdesk-friendly-backup-report.json")); err != nil {
+		t.Fatalf("backup report missing: %v", err)
+	}
 }
 
 func TestRunLinuxBackupNoFiles(t *testing.T) {

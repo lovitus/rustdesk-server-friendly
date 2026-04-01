@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/lovitus/rustdesk-server-friendly/internal/bundle"
 	"github.com/lovitus/rustdesk-server-friendly/internal/common"
@@ -37,6 +38,7 @@ type Result struct {
 	ServiceManager    string
 	PackageContents   []bundle.FileEntry
 	VerificationLevel string
+	BackupReportPath  string
 }
 
 type archiveEntry struct {
@@ -150,6 +152,11 @@ func Run(opts Options) (Result, error) {
 	for _, entry := range entries {
 		result.Files = append(result.Files, entry.Dst)
 	}
+	reportPath, err := writeBackupReport(result)
+	if err != nil {
+		return Result{}, err
+	}
+	result.BackupReportPath = reportPath
 	sort.Strings(result.Files)
 	logResult(opts.Out, result)
 	return result, nil
@@ -589,12 +596,69 @@ func logResult(out io.Writer, result Result) {
 	fmt.Fprintf(out, "[OK] Verification level: %s\n", result.VerificationLevel)
 	fmt.Fprintf(out, "[OK] Archive: %s\n", result.ArchivePath)
 	fmt.Fprintf(out, "[OK] SHA256: %s\n", result.SHA256)
+	if strings.TrimSpace(result.BackupReportPath) != "" {
+		fmt.Fprintf(out, "[OK] Backup report: %s\n", result.BackupReportPath)
+	}
 	for _, check := range result.Checks {
 		fmt.Fprintf(out, "[CHECK] %s\n", check)
 	}
 	for _, warning := range result.Warnings {
 		fmt.Fprintf(out, "[WARN] %s\n", warning)
 	}
+}
+
+func writeBackupReport(result Result) (string, error) {
+	baseDir := filepath.Dir(result.ArchivePath)
+	payload := map[string]any{
+		"archive":            result.ArchivePath,
+		"sha256":             result.SHA256,
+		"verification_level": result.VerificationLevel,
+		"runtime":            fmt.Sprintf("%s/%s", result.DetectedRuntime.OS, result.DetectedRuntime.Arch),
+		"service_manager":    result.ServiceManager,
+		"data_dir":           result.DetectedRuntime.DataDir,
+		"install_dir":        result.DetectedRuntime.InstallDir,
+		"log_dir":            result.DetectedRuntime.LogDir,
+		"checks":             result.Checks,
+		"warnings":           result.Warnings,
+		"package_contents":   result.PackageContents,
+		"generated_at":       time.Now().UTC().Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	jsonPath := filepath.Join(baseDir, "rustdesk-friendly-backup-report.json")
+	if err := os.WriteFile(jsonPath, data, 0o644); err != nil {
+		return "", err
+	}
+	mdLines := []string{
+		"# RustDesk Friendly Backup Report",
+		"",
+		fmt.Sprintf("- Archive: `%s`", result.ArchivePath),
+		fmt.Sprintf("- SHA256: `%s`", result.SHA256),
+		fmt.Sprintf("- Runtime: `%s/%s`", result.DetectedRuntime.OS, result.DetectedRuntime.Arch),
+		fmt.Sprintf("- Verification Level: `%s`", result.VerificationLevel),
+		fmt.Sprintf("- Service Manager: `%s`", emptyOr(result.ServiceManager, "not detected")),
+		fmt.Sprintf("- Source Data Dir: `%s`", emptyOr(result.DetectedRuntime.DataDir, "not detected")),
+		fmt.Sprintf("- Source Install Dir: `%s`", emptyOr(result.DetectedRuntime.InstallDir, "not detected")),
+		fmt.Sprintf("- Source Log Dir: `%s`", emptyOr(result.DetectedRuntime.LogDir, "not detected")),
+		"",
+		"## Checks",
+	}
+	for _, check := range result.Checks {
+		mdLines = append(mdLines, "- "+check)
+	}
+	if len(result.Warnings) > 0 {
+		mdLines = append(mdLines, "", "## Warnings")
+		for _, warning := range result.Warnings {
+			mdLines = append(mdLines, "- "+warning)
+		}
+	}
+	mdPath := filepath.Join(baseDir, "rustdesk-friendly-backup-report.md")
+	if err := os.WriteFile(mdPath, []byte(strings.Join(mdLines, "\n")+"\n"), 0o644); err != nil {
+		return "", err
+	}
+	return jsonPath, nil
 }
 
 func emptyOr(v, fallback string) string {

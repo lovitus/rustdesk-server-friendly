@@ -51,6 +51,7 @@ type Result struct {
 	IsolatedValidationDataDir  string
 	IsolatedValidationServices []string
 	VerificationInstructions   []string
+	VerificationReportPath     string
 }
 
 func Run(opts Options) (Result, error) {
@@ -206,6 +207,12 @@ func Run(opts Options) (Result, error) {
 			result.Checks = append(result.Checks, "operator confirmed isolated live restore validation")
 		}
 	}
+
+	reportPath, err := writeVerificationReport(result, archivePath)
+	if err != nil {
+		return result, err
+	}
+	result.VerificationReportPath = reportPath
 
 	sort.Strings(result.RestoredFiles)
 	logResult(opts.Out, result)
@@ -399,6 +406,83 @@ func writeLiveVerifyState(dir, archivePath, level string, confirmed bool) error 
 	return os.WriteFile(filepath.Join(dir, ".rustdesk-friendly-live-verify.json"), data, 0o644)
 }
 
+func writeVerificationReport(result Result, archivePath string) (string, error) {
+	baseDir := result.TargetDataDir
+	if result.IsolatedValidationDataDir != "" {
+		baseDir = result.IsolatedValidationDataDir
+	}
+	if strings.TrimSpace(baseDir) == "" {
+		baseDir = filepath.Dir(archivePath)
+	}
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		return "", err
+	}
+	payload := map[string]any{
+		"archive":                      archivePath,
+		"target_data_dir":              result.TargetDataDir,
+		"verification_level":           result.VerificationLevel,
+		"user_confirmed_live_restore":  result.UserConfirmedLiveRestore,
+		"isolated_validation_data_dir": result.IsolatedValidationDataDir,
+		"isolated_validation_services": result.IsolatedValidationServices,
+		"verification_instructions":    result.VerificationInstructions,
+		"checks":                       result.Checks,
+		"warnings":                     result.Warnings,
+		"blocking_issues":              result.BlockingIssues,
+		"restored_files":               result.RestoredFiles,
+		"service_manager":              result.ServiceManager,
+		"runtime":                      fmt.Sprintf("%s/%s", result.DetectedRuntime.OS, result.DetectedRuntime.Arch),
+		"generated_at":                 time.Now().UTC().Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	jsonPath := filepath.Join(baseDir, ".rustdesk-friendly-verification-report.json")
+	if err := os.WriteFile(jsonPath, data, 0o644); err != nil {
+		return "", err
+	}
+	md := buildVerificationMarkdown(result, archivePath)
+	if err := os.WriteFile(filepath.Join(baseDir, "rustdesk-friendly-verification-report.md"), []byte(md), 0o644); err != nil {
+		return "", err
+	}
+	return jsonPath, nil
+}
+
+func buildVerificationMarkdown(result Result, archivePath string) string {
+	lines := []string{
+		"# RustDesk Friendly Verification Report",
+		"",
+		fmt.Sprintf("- Archive: `%s`", archivePath),
+		fmt.Sprintf("- Runtime: `%s/%s`", result.DetectedRuntime.OS, result.DetectedRuntime.Arch),
+		fmt.Sprintf("- Verification Level: `%s`", result.VerificationLevel),
+		fmt.Sprintf("- User Confirmed Live Restore: `%t`", result.UserConfirmedLiveRestore),
+		fmt.Sprintf("- Target Data Dir: `%s`", result.TargetDataDir),
+	}
+	if result.IsolatedValidationDataDir != "" {
+		lines = append(lines, fmt.Sprintf("- Isolated Validation Dir: `%s`", result.IsolatedValidationDataDir))
+	}
+	if len(result.IsolatedValidationServices) > 0 {
+		lines = append(lines, fmt.Sprintf("- Isolated Services: `%s`", strings.Join(result.IsolatedValidationServices, "`, `")))
+	}
+	lines = append(lines, "", "## Checks")
+	for _, check := range result.Checks {
+		lines = append(lines, "- "+check)
+	}
+	if len(result.Warnings) > 0 {
+		lines = append(lines, "", "## Warnings")
+		for _, warning := range result.Warnings {
+			lines = append(lines, "- "+warning)
+		}
+	}
+	if len(result.VerificationInstructions) > 0 {
+		lines = append(lines, "", "## Verification Instructions")
+		for _, step := range result.VerificationInstructions {
+			lines = append(lines, "- "+step)
+		}
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
 func verificationInstructions(rt runtimeinfo.Runtime, archivePath, dataDir string, serviceNames []string) []string {
 	lines := []string{
 		fmt.Sprintf("verification archive: %s", archivePath),
@@ -408,15 +492,23 @@ func verificationInstructions(rt runtimeinfo.Runtime, archivePath, dataDir strin
 		lines = append(lines, "isolated services: "+strings.Join(serviceNames, ", "))
 	}
 	lines = append(lines,
-		"temporarily point a test client at the isolated verification server configuration",
-		"confirm the original production server continues serving clients without impact",
+		"pick one non-production test client and note its current ID server / relay configuration before changing anything",
+		"temporarily point that test client at the isolated verification server configuration only",
+		"confirm the original production server continues serving existing clients without impact while the test client is redirected",
 		"confirm the isolated verification instance starts and accepts the expected RustDesk traffic",
+		"confirm the test client can register, stay online, and complete an expected session path against the isolated instance",
 		"after validation, return to this tool and confirm live restore success to mark the archive as live_restore_verified",
 	)
 	if rt.OS == "windows" {
-		lines = append(lines, "on Windows, verify the temporary service instances in Services, NSSM, or pm2 depending on the detected manager")
+		lines = append(lines,
+			"on Windows, verify the temporary service instances in Services, NSSM, or pm2 depending on the detected manager",
+			"on Windows, confirm the test client can connect after updating its ID/Relay server fields to the isolated validation instance",
+		)
 	} else if rt.OS == "linux" {
-		lines = append(lines, "on Linux, verify the temporary systemd units and listening sockets before client testing")
+		lines = append(lines,
+			"on Linux, verify the temporary systemd units and listening sockets before client testing",
+			"on Linux, confirm the test client can connect after updating its ID/Relay server fields to the isolated validation instance",
+		)
 	}
 	return lines
 }
@@ -479,6 +571,9 @@ func logResult(out io.Writer, result Result) {
 	fmt.Fprintf(out, "[OK] Verification level: %s\n", result.VerificationLevel)
 	if len(result.IsolatedValidationServices) > 0 {
 		fmt.Fprintf(out, "[OK] Isolated services: %s\n", strings.Join(result.IsolatedValidationServices, ", "))
+	}
+	if strings.TrimSpace(result.VerificationReportPath) != "" {
+		fmt.Fprintf(out, "[OK] Verification report: %s\n", result.VerificationReportPath)
 	}
 	for _, check := range result.Checks {
 		fmt.Fprintf(out, "[CHECK] %s\n", check)

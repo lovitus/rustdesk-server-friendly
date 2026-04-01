@@ -79,6 +79,7 @@ Backup rules:
 - packs data, detected binaries, detected service definitions, log snapshot metadata, and `manifest.json`
 - reopens the archive and verifies required restore content before returning success
 - in interactive mode, backup can immediately continue into isolated live-restore verification on the same host
+- writes backup reports beside the archive as `rustdesk-friendly-backup-report.json` and `.md`
 
 Verification levels:
 
@@ -115,6 +116,7 @@ Restore behavior:
 - registers managed services on Linux/Windows when supported by the runtime and current permissions
 - performs post-restore health checks
 - can mark the archive as `live_restore_verified` after operator confirmation
+- writes verification reports into the target or isolated verification directory
 
 ### Diagnose / Repair
 
