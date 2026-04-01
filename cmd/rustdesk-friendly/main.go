@@ -8,7 +8,9 @@ import (
 	"strings"
 
 	"github.com/lovitus/rustdesk-server-friendly/internal/backup"
+	"github.com/lovitus/rustdesk-server-friendly/internal/doctor"
 	"github.com/lovitus/rustdesk-server-friendly/internal/guide"
+	"github.com/lovitus/rustdesk-server-friendly/internal/install"
 	"github.com/lovitus/rustdesk-server-friendly/internal/restore"
 	"github.com/lovitus/rustdesk-server-friendly/internal/wizard"
 )
@@ -26,6 +28,13 @@ func main() {
 
 	sub := strings.ToLower(os.Args[1])
 	switch sub {
+	case "new-service":
+		if err := runNewService(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	case "diagnose":
+		doctor.Run(os.Stdout)
 	case "guide":
 		if err := runGuide(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -102,13 +111,18 @@ func runGuide(args []string) error {
 
 func runApply(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("apply requires a subcommand: backup|import")
+		return fmt.Errorf("apply requires a subcommand: backup|import|new-service|diagnose")
 	}
 	switch strings.ToLower(args[0]) {
 	case "backup":
 		return runApplyBackup(args[1:])
 	case "import":
 		return runApplyImport(args[1:])
+	case "new-service":
+		return runNewService(args[1:])
+	case "diagnose":
+		doctor.Run(os.Stdout)
+		return nil
 	default:
 		return fmt.Errorf("unknown apply subcommand: %s", args[0])
 	}
@@ -144,6 +158,10 @@ func runApplyImport(args []string) error {
 	archive := fs.String("archive", "", "backup archive path (.zip/.tgz/.tar.gz)")
 	targetDataDir := fs.String("target-data-dir", "", "target rustdesk data dir")
 	force := fs.Bool("force", false, "overwrite existing migration files in target dir")
+	validateOnly := fs.Bool("validate-only", false, "validate archive and restore plan without writing target data")
+	liveVerify := fs.Bool("live-verify", false, "restore to isolated validation directory and service plan")
+	userConfirmedLive := fs.Bool("user-confirmed-live", false, "mark isolated live restore as verified")
+	tripleConfirmed := fs.Bool("triple-confirmed", false, "confirm high-risk overwrite flow was acknowledged")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -152,11 +170,15 @@ func runApplyImport(args []string) error {
 	}
 
 	res, err := restore.Run(restore.Options{
-		TargetOS:      *target,
-		Archive:       *archive,
-		TargetDataDir: *targetDataDir,
-		Force:         *force,
-		Out:           os.Stdout,
+		TargetOS:          *target,
+		Archive:           *archive,
+		TargetDataDir:     *targetDataDir,
+		Force:             *force,
+		ValidateOnly:      *validateOnly,
+		LiveVerify:        *liveVerify,
+		UserConfirmedLive: *userConfirmedLive,
+		TripleConfirmed:   *tripleConfirmed,
+		Out:               os.Stdout,
 	})
 	if err != nil {
 		return err
@@ -165,11 +187,28 @@ func runApplyImport(args []string) error {
 	return nil
 }
 
+func runNewService(args []string) error {
+	fs := flag.NewFlagSet("new-service", flag.ContinueOnError)
+	target := fs.String("target", "", "target os: windows|linux|darwin")
+	tripleConfirmed := fs.Bool("triple-confirmed", false, "acknowledge takeover when existing service/data is present")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	_, err := install.Run(install.Options{
+		TargetOS:        *target,
+		TripleConfirmed: *tripleConfirmed,
+		Out:             os.Stdout,
+	})
+	return err
+}
+
 func printHelp() {
 	fmt.Print(`rustdesk-friendly (Go rewrite)
 
 Usage:
   rustdesk-friendly                 # interactive wizard
+  rustdesk-friendly new-service
+  rustdesk-friendly diagnose
   rustdesk-friendly wizard [--output FILE]
   rustdesk-friendly guide [flags]
   rustdesk-friendly apply backup [flags]
@@ -195,5 +234,9 @@ Apply import flags:
   --archive <backup-archive>
   --target-data-dir <dir>
   --force
+  --validate-only
+  --live-verify
+  --user-confirmed-live
+  --triple-confirmed
 `)
 }

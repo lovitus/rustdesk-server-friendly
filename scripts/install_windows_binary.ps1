@@ -7,7 +7,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $OwnerRepo = "lovitus/rustdesk-server-friendly"
-$Asset = "rustdesk-friendly-windows-amd64.exe"
+
+switch -Regex ($env:PROCESSOR_ARCHITECTURE) {
+    "ARM64" { $Asset = "rustdesk-friendly-windows-arm64.exe" }
+    default { $Asset = "rustdesk-friendly-windows-amd64.exe" }
+}
 
 function Test-Command([string]$Name) {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)

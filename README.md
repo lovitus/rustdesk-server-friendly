@@ -1,57 +1,135 @@
-# rustdesk-server-friendly (Go)
+# rustdesk-server-friendly
 
-A Go-based CLI for generating RustDesk self-host runbooks with:
+Go-based RustDesk lifecycle manager.
 
-- one-run interactive workflow (`rustdesk-friendly`)
-- executable local backup command (`rustdesk-friendly apply backup`)
-- executable import/restore command (`rustdesk-friendly apply import`)
-- idempotent deploy/service/log scripts (`[SKIP]` / `[STOP]` guards)
-- migration guides for all pairs:
-  - Linux -> Linux
-  - Linux -> Windows
-  - Windows -> Linux
-  - Windows -> Windows
-- auto-detection hints for runtime data paths (service/PM2/NSSM)
-- multiple download methods:
-  - Linux: `wget` / `curl`
-  - Windows: `Invoke-WebRequest` / `curl.exe` / `gh` (install via `winget`)
+Default experience:
 
-## Install (Prebuilt Binary)
+- download
+- run
+- choose one action:
+  - `new-service`
+  - `backup-migrate`
+  - `restore-service`
+  - `diagnose-repair`
+
+The program now favors execution over runbook generation:
+
+- detects runtime, service manager, directories, binaries, and common conflicts
+- keeps backup read-only on the source side
+- creates a structured backup package with manifest and restore plan
+- validates archive restorable state before declaring backup success
+- restores through staging and rollback-aware flow
+- supports isolated live-restore verification and archive verification marking
+- downloads upstream RustDesk Server binaries when the target host does not already have them
+- executes Linux `systemd` and Windows service registration when the local runtime and permissions allow it
+- prefers Windows `NSSM`, then `pm2`, then native `sc` when registering services
+- requires triple confirmation for `new-service` and `restore-service` when existing RustDesk service/data is detected
+
+## Support Matrix
+
+- Linux: `amd64`, `arm64`, `armv7`
+- Windows: `amd64`, `arm64`
+- macOS: `amd64`, `arm64`
+
+macOS is limited to backup, archive validation, restore planning, and isolated local verification. It does not provide managed service hosting.
+
+## Install
 
 ### Linux
 
 ```bash
-# latest release, auto choose curl/wget
 bash <(curl -fsSL https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_linux_binary.sh)
-
-# or pin a release tag
-bash <(curl -fsSL https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_linux_binary.sh) v1.1.0
+rustdesk-friendly
 ```
 
 ### Windows PowerShell
 
 ```powershell
-# latest release (run in current PowerShell session)
 iwr -useb https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_windows_binary.ps1 | iex
-
-# specific version
-powershell -ExecutionPolicy Bypass -File .\scripts\install_windows_binary.ps1 -Version v1.1.0
-
-# after install
 rustdesk-friendly
 ```
 
-Notes:
-- Do not run raw paths with spaces without call syntax.
-- If you must run full path, use:
-  - `& "C:\Users\<You>\AppData\Local\rustdesk-server-friendly\rustdesk-friendly.exe"`
-- The installer adds `%LOCALAPPDATA%\rustdesk-server-friendly\bin` to user PATH.
+## Main Flows
+
+### Interactive
+
+```bash
+rustdesk-friendly
+```
+
+### New Service
+
+```bash
+rustdesk-friendly new-service
+```
+
+If the machine already contains RustDesk service/data/ports, the program blocks until the operator completes all three confirmations.
+
+### Backup / Migrate
+
+```bash
+rustdesk-friendly apply backup --source linux --output /tmp/rustdesk-lifecycle-backup.tgz
+```
+
+Backup rules:
+
+- never stops the source service
+- never edits source files
+- never deletes source files
+- packs data, detected binaries, detected service definitions, log snapshot metadata, and `manifest.json`
+- reopens the archive and verifies required restore content before returning success
+
+Verification levels:
+
+- `archive_valid`
+- `restorable_verified`
+- `live_restore_verified`
+
+### Restore Service
+
+```bash
+rustdesk-friendly apply import --target linux --archive /tmp/rustdesk-lifecycle-backup.tgz --force --triple-confirmed
+```
+
+Useful flags:
+
+- `--validate-only`
+- `--live-verify`
+- `--user-confirmed-live`
+- `--triple-confirmed`
+
+Restore behavior:
+
+- validates manifest and required files
+- prepares staging extraction
+- creates rollback copy for conflicting target files
+- restores into target or isolated verification directory
+- auto-downloads target binaries when they are missing
+- registers managed services on Linux/Windows when supported by the runtime and current permissions
+- performs post-restore health checks
+- can mark the archive as `live_restore_verified` after operator confirmation
+
+### Diagnose / Repair
+
+```bash
+rustdesk-friendly diagnose
+```
+
+This prints runtime support, detected service manager, detected data directory, and common port conflicts.
+
+## Advanced Mode
+
+The generated guide flow still exists, but it is now an advanced path:
+
+```bash
+rustdesk-friendly guide --target linux --topic all
+```
 
 ## Build From Source
 
 Prerequisites:
 
-- Go 1.26+
+- Go `1.26+`
 - Git
 
 ```bash
@@ -61,57 +139,22 @@ go build -o rustdesk-friendly ./cmd/rustdesk-friendly
 ./rustdesk-friendly version
 ```
 
-Windows:
-
-```powershell
-git clone https://github.com/lovitus/rustdesk-server-friendly.git
-cd rustdesk-server-friendly
-go build -o rustdesk-friendly.exe .\cmd\rustdesk-friendly
-.\rustdesk-friendly.exe version
-```
-
-## Usage
-
-```bash
-# interactive app (recommended)
-rustdesk-friendly
-
-# execute real source backup
-rustdesk-friendly apply backup --source windows
-
-# execute import/restore from archive
-rustdesk-friendly apply import --target linux --archive /tmp/rustdesk-migration-backup.tgz
-```
-
-Important:
-- `backup` is read-only: no service stop, no source file modification, no deletion.
-- `import` validates archive structure before writing anything.
-- interactive mode provides 3 choices: `backup` / `import` / `generate-guide`.
-- if auto-detect fails, program will immediately ask for manual path and retry.
-
-## Quality Controls in Generated Scripts
-
-- install conflict protection: `FORCE_REINSTALL=1`
-- migration overwrite protection: `ALLOW_OVERWRITE=1`
-- optional release pin: `RUSTDESK_RELEASE_TAG`
-- optional archive hash check: `RUSTDESK_ZIP_SHA256`
-- path override fallback: `RUSTDESK_SOURCE_DATA_DIR`, `RUSTDESK_TARGET_DATA_DIR`
-
 ## Test
 
 ```bash
 go test ./...
 ```
 
-## Release Assets
+## Notes
 
-Published binaries follow these names:
-
-- `rustdesk-friendly-linux-amd64`
-- `rustdesk-friendly-linux-arm64`
-- `rustdesk-friendly-windows-amd64.exe`
-- `rustdesk-friendly-darwin-amd64`
-- `rustdesk-friendly-darwin-arm64`
+- Linux service management targets `systemd`.
+- Windows service management prefers `NSSM`, then `pm2`, then native `sc`.
+- Cross-platform restore uses source metadata plus target runtime mapping and can fetch matching upstream binaries for the destination runtime.
+- Windows installer auto-selects `amd64` or `arm64` release assets based on the local architecture.
+- Test and CI flows can disable real download or service execution with:
+  - `RUSTDESK_FRIENDLY_SKIP_DOWNLOAD=1`
+  - `RUSTDESK_FRIENDLY_SKIP_SYSTEMCTL=1`
+  - `RUSTDESK_FRIENDLY_SKIP_SC=1`
 
 ## Sources
 

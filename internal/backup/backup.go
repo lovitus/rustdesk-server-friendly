@@ -4,16 +4,18 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
+
+	"github.com/lovitus/rustdesk-server-friendly/internal/bundle"
+	"github.com/lovitus/rustdesk-server-friendly/internal/common"
+	"github.com/lovitus/rustdesk-server-friendly/internal/runtimeinfo"
 )
 
 type Options struct {
@@ -25,321 +27,474 @@ type Options struct {
 }
 
 type Result struct {
-	ArchivePath string
-	SHA256      string
-	Files       []string
+	ArchivePath       string
+	SHA256            string
+	Files             []string
+	Checks            []string
+	Warnings          []string
+	BlockingIssues    []string
+	DetectedRuntime   runtimeinfo.Runtime
+	ServiceManager    string
+	PackageContents   []bundle.FileEntry
+	VerificationLevel string
+}
+
+type archiveEntry struct {
+	Src  string
+	Dst  string
+	Kind string
+}
+
+type ArchiveRewriteEntry struct {
+	Src string
+	Dst string
 }
 
 func Run(opts Options) (Result, error) {
-	sourceOS := strings.ToLower(strings.TrimSpace(opts.SourceOS))
+	sourceOS := normalizeOS(opts.SourceOS)
+	rt := runtimeinfo.Detect(sourceOS)
 	if sourceOS == "" {
-		if runtime.GOOS == "windows" {
-			sourceOS = "windows"
-		} else {
-			sourceOS = "linux"
-		}
+		sourceOS = rt.OS
 	}
-	if sourceOS != "windows" && sourceOS != "linux" {
-		return Result{}, fmt.Errorf("unsupported source OS: %s", sourceOS)
+	if !rt.Supported {
+		return Result{}, fmt.Errorf("unsupported source runtime: %s/%s: %s", rt.OS, rt.Arch, rt.SupportReason)
 	}
 
-	dataDir := strings.TrimSpace(opts.SourceDataDir)
-	if dataDir == "" {
-		dataDir = detectDataDir(sourceOS)
+	if strings.TrimSpace(opts.SourceDataDir) != "" {
+		rt.DataDir = strings.TrimSpace(opts.SourceDataDir)
 	}
-	if dataDir == "" {
-		return Result{}, fmt.Errorf("cannot detect RustDesk source data dir; set --source-data-dir or RUSTDESK_SOURCE_DATA_DIR")
+	if rt.DataDir == "" {
+		return Result{}, fmt.Errorf("cannot detect RustDesk source data dir")
 	}
-	if st, err := os.Stat(dataDir); err != nil || !st.IsDir() {
-		return Result{}, fmt.Errorf("source data dir not found: %s", dataDir)
+	if st, err := os.Stat(rt.DataDir); err != nil || !st.IsDir() {
+		return Result{}, fmt.Errorf("source data dir not found: %s", rt.DataDir)
 	}
 
-	files, err := collectFiles(dataDir)
+	entries, warnings, err := collectEntries(rt)
 	if err != nil {
 		return Result{}, err
 	}
-	if len(files) == 0 {
-		return Result{}, fmt.Errorf("no migration files found in %s", dataDir)
+	if len(entries) == 0 {
+		return Result{}, fmt.Errorf("no RustDesk content found to back up")
 	}
 
 	archivePath := strings.TrimSpace(opts.Output)
 	if archivePath == "" {
 		if sourceOS == "windows" {
-			archivePath = `C:\rustdesk-migration-backup\rustdesk-migration-backup.zip`
+			archivePath = `C:\rustdesk-migration-backup\rustdesk-lifecycle-backup.zip`
 		} else {
-			archivePath = `/tmp/rustdesk-migration-backup.tgz`
+			archivePath = `/tmp/rustdesk-lifecycle-backup.tgz`
 		}
 	}
-	absArchive, err := filepath.Abs(archivePath)
-	if err == nil {
-		archivePath = absArchive
-	}
-
+	archivePath = common.Abs(archivePath)
 	if _, err := os.Stat(archivePath); err == nil && !opts.Force {
-		return Result{}, fmt.Errorf("archive already exists: %s (use --force to overwrite)", archivePath)
+		return Result{}, fmt.Errorf("archive already exists: %s", archivePath)
 	}
 	if err := os.MkdirAll(filepath.Dir(archivePath), 0o755); err != nil {
 		return Result{}, err
 	}
 
-	if sourceOS == "windows" {
-		err = writeZip(archivePath, files)
-	} else {
-		err = writeTarGz(archivePath, files)
-	}
-	if err != nil {
-		return Result{}, err
-	}
+	manifest := bundle.NewManifest(rt)
+	manifest.Warnings = append(manifest.Warnings, warnings...)
+	manifest.Checks = append(manifest.Checks,
+		"backup is read-only and does not stop or modify the source service",
+		"archive manifest generated",
+	)
+	manifest.RestorePlan = defaultRestorePlan(rt)
 
-	hash, err := fileSHA256(archivePath)
-	if err != nil {
-		return Result{}, err
-	}
-
-	if opts.Out != nil {
-		fmt.Fprintf(opts.Out, "[SAFE] Backup is read-only: no service stop, no source file modification, no deletion.\n")
-		fmt.Fprintf(opts.Out, "[OK] Source data dir: %s\n", dataDir)
-		fmt.Fprintf(opts.Out, "[OK] Files packed: %d\n", len(files))
-		for _, f := range files {
-			fmt.Fprintf(opts.Out, "  - %s\n", filepath.Base(f))
+	for _, entry := range entries {
+		if err := manifest.AddFile(entry.Src, entry.Kind); err != nil {
+			return Result{}, err
 		}
-		fmt.Fprintf(opts.Out, "[OK] Archive: %s\n", archivePath)
-		fmt.Fprintf(opts.Out, "[OK] SHA256: %s\n", hash)
 	}
 
-	return Result{ArchivePath: archivePath, SHA256: hash, Files: files}, nil
+	data, err := manifest.Marshal()
+	if err != nil {
+		return Result{}, err
+	}
+
+	if sourceOS == "windows" {
+		err = writeZip(archivePath, entries, data)
+	} else {
+		err = writeTarGz(archivePath, entries, data)
+	}
+	if err != nil {
+		return Result{}, err
+	}
+
+	verifiedManifest, err := VerifyArchive(archivePath)
+	if err != nil {
+		return Result{}, err
+	}
+	verifiedManifest.VerificationLevel = bundle.VerificationRestorable
+	verifiedManifest.Checks = append(verifiedManifest.Checks, "archive reopened and manifest revalidated")
+	if err := rewriteManifest(archivePath, sourceOS, verifiedManifest); err != nil {
+		return Result{}, err
+	}
+
+	hash, err := common.FileSHA256(archivePath)
+	if err != nil {
+		return Result{}, err
+	}
+
+	result := Result{
+		ArchivePath:       archivePath,
+		SHA256:            hash,
+		Checks:            verifiedManifest.Checks,
+		Warnings:          verifiedManifest.Warnings,
+		DetectedRuntime:   rt,
+		ServiceManager:    rt.ServiceManager,
+		PackageContents:   verifiedManifest.PackageContents,
+		VerificationLevel: verifiedManifest.VerificationLevel,
+	}
+	for _, entry := range entries {
+		result.Files = append(result.Files, entry.Dst)
+	}
+	sort.Strings(result.Files)
+	logResult(opts.Out, result)
+	return result, nil
 }
 
-func detectDataDir(sourceOS string) string {
-	if env := strings.TrimSpace(os.Getenv("RUSTDESK_SOURCE_DATA_DIR")); env != "" {
-		if d := chooseBestDataDir([]string{env}); d != "" {
-			return d
+func VerifyArchive(path string) (bundle.Manifest, error) {
+	tmp, files, manifest, err := extractToTemp(path)
+	if err != nil {
+		return bundle.Manifest{}, err
+	}
+	defer os.RemoveAll(tmp)
+	if manifest.Version == "" {
+		return bundle.Manifest{}, fmt.Errorf("archive missing manifest")
+	}
+	if len(files) == 0 {
+		return bundle.Manifest{}, fmt.Errorf("archive has no restorable content")
+	}
+	hasPriv, hasPub := false, false
+	for _, f := range files {
+		base := filepath.Base(f)
+		if base == "id_ed25519" {
+			hasPriv = true
+		}
+		if base == "id_ed25519.pub" {
+			hasPub = true
+		}
+	}
+	if !hasPriv || !hasPub {
+		return bundle.Manifest{}, fmt.Errorf("archive invalid: missing id_ed25519 or id_ed25519.pub")
+	}
+	return manifest, nil
+}
+
+func ExtractArchiveForRestore(path string) (string, []string, bundle.Manifest, error) {
+	return extractToTemp(path)
+}
+
+func extractToTemp(path string) (string, []string, bundle.Manifest, error) {
+	tmp, err := os.MkdirTemp("", "rustdesk-friendly-backup-verify-")
+	if err != nil {
+		return "", nil, bundle.Manifest{}, err
+	}
+	lower := strings.ToLower(path)
+	files := []string{}
+	var manifest bundle.Manifest
+	save := func(name string, r io.Reader) error {
+		base := filepath.Base(name)
+		outPath := filepath.Join(tmp, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+			return err
+		}
+		data, err := io.ReadAll(r)
+		if err != nil {
+			return err
+		}
+		if base == bundle.ManifestName {
+			manifest, err = bundle.Parse(data)
+			return err
+		}
+		if err := os.WriteFile(outPath, data, 0o644); err != nil {
+			return err
+		}
+		files = append(files, outPath)
+		return nil
+	}
+	if strings.HasSuffix(lower, ".zip") {
+		zr, err := zip.OpenReader(path)
+		if err != nil {
+			return "", nil, bundle.Manifest{}, err
+		}
+		defer zr.Close()
+		for _, f := range zr.File {
+			if f.FileInfo().IsDir() {
+				continue
+			}
+			rc, err := f.Open()
+			if err != nil {
+				return "", nil, bundle.Manifest{}, err
+			}
+			if err := save(f.Name, rc); err != nil {
+				rc.Close()
+				return "", nil, bundle.Manifest{}, err
+			}
+			rc.Close()
+		}
+		return tmp, files, manifest, nil
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return "", nil, bundle.Manifest{}, err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return "", nil, bundle.Manifest{}, err
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", nil, bundle.Manifest{}, err
+		}
+		if h.FileInfo().IsDir() {
+			continue
+		}
+		if err := save(h.Name, tr); err != nil {
+			return "", nil, bundle.Manifest{}, err
+		}
+	}
+	return tmp, files, manifest, nil
+}
+
+func collectEntries(rt runtimeinfo.Runtime) ([]archiveEntry, []string, error) {
+	entries := []archiveEntry{}
+	warnings := []string{}
+	addFile := func(src, dst, kind string) {
+		if src == "" || !isFile(src) {
+			return
+		}
+		entries = append(entries, archiveEntry{Src: src, Dst: dst, Kind: kind})
+	}
+
+	for _, name := range []string{"id_ed25519", "id_ed25519.pub"} {
+		addFile(filepath.Join(rt.DataDir, name), filepath.ToSlash(filepath.Join("data", name)), "data")
+	}
+	patterns := []string{"db_v2.sqlite3*", "db.sqlite3*"}
+	for _, pattern := range patterns {
+		matches, err := filepath.Glob(filepath.Join(rt.DataDir, pattern))
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, match := range matches {
+			addFile(match, filepath.ToSlash(filepath.Join("data", filepath.Base(match))), "data")
 		}
 	}
 
-	candidates := []string{}
-	if sourceOS == "windows" {
-		candidates = []string{
-			`C:\RustDesk-Server\data`,
-			`C:\rustdesk-server\data`,
-			`C:\Program Files\RustDesk Server\data`,
-		}
-		candidates = append(candidates, detectWindowsCandidates()...)
-	} else {
-		candidates = []string{
-			`/var/lib/rustdesk-server`,
-			`/opt/rustdesk-server`,
-			`/opt/rustdesk`,
-		}
+	for name, path := range rt.BinaryPaths {
+		ext := filepath.Ext(path)
+		dst := filepath.ToSlash(filepath.Join("app", name+ext))
+		addFile(path, dst, "app")
 	}
-	return chooseBestDataDir(candidates)
+	if len(rt.BinaryPaths) == 0 {
+		warnings = append(warnings, "running binaries were not detected; restore will rely on target-side download")
+	}
+
+	for _, path := range rt.ServiceDefinitions {
+		addFile(path, filepath.ToSlash(filepath.Join("service", sanitizeName(path))), "service")
+	}
+	if rt.LogDir != "" && isDir(rt.LogDir) {
+		entries = append(entries, archiveEntry{
+			Src:  rt.LogDir,
+			Dst:  filepath.ToSlash(filepath.Join("logs", "snapshot.json")),
+			Kind: "logs",
+		})
+	}
+
+	if len(entries) == 0 {
+		return nil, warnings, nil
+	}
+	return entries, warnings, nil
 }
 
 func chooseBestDataDir(candidates []string) string {
 	firstExisting := ""
 	seen := map[string]bool{}
-	for _, c := range candidates {
-		for _, d := range []string{strings.TrimSpace(c), filepath.Join(strings.TrimSpace(c), "data")} {
-			if d == "" || seen[d] {
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		for _, dir := range []string{candidate, filepath.Join(candidate, "data")} {
+			if dir == "" || seen[dir] {
 				continue
 			}
-			seen[d] = true
-			if !isDir(d) {
+			seen[dir] = true
+			if !isDir(dir) {
 				continue
 			}
 			if firstExisting == "" {
-				firstExisting = d
+				firstExisting = dir
 			}
-			if hasExpectedFiles(d) {
-				return d
+			for _, name := range []string{"id_ed25519", "id_ed25519.pub", "db_v2.sqlite3", "db.sqlite3"} {
+				if isFile(filepath.Join(dir, name)) {
+					return dir
+				}
 			}
 		}
 	}
 	return firstExisting
 }
 
-func hasExpectedFiles(dir string) bool {
-	for _, name := range []string{"id_ed25519", "id_ed25519.pub", "db_v2.sqlite3", "db.sqlite3"} {
-		if st, err := os.Stat(filepath.Join(dir, name)); err == nil && !st.IsDir() {
-			return true
-		}
+func defaultRestorePlan(rt runtimeinfo.Runtime) []string {
+	plan := []string{
+		"validate archive manifest and required files",
+		"prepare target staging directory",
+		"map or download target binaries for the destination OS/arch",
+		"restore data into staging area",
+		"create or repair managed service definitions",
+		"run health checks before cutover",
 	}
-	for _, p := range []string{"db_v2.sqlite3*", "db.sqlite3*"} {
-		matched, _ := filepath.Glob(filepath.Join(dir, p))
-		for _, m := range matched {
-			if st, err := os.Stat(m); err == nil && !st.IsDir() {
-				return true
-			}
-		}
+	if rt.ExistingService {
+		plan = append(plan, "backup current target state and enable rollback before any cutover")
 	}
-	return false
+	return plan
 }
 
-func detectWindowsCandidates() []string {
-	out := []string{}
-	out = append(out, detectWindowsPM2Candidates()...)
-	out = append(out, detectWindowsServiceCandidates()...)
-	out = append(out, detectWindowsProcessCandidates()...)
-	return dedupe(out)
-}
-
-func detectWindowsPM2Candidates() []string {
-	if !hasCmd("pm2") {
-		return nil
+func rewriteManifest(path, sourceOS string, manifest bundle.Manifest) error {
+	tmpDir, err := os.MkdirTemp("", "rustdesk-friendly-manifest-rewrite-")
+	if err != nil {
+		return err
 	}
-	b, err := exec.Command("pm2", "jlist").Output()
-	if err != nil || len(b) == 0 {
-		return nil
+	defer os.RemoveAll(tmpDir)
+	verifyDir, files, _, err := extractToTemp(path)
+	if err != nil {
+		return err
 	}
-	type pm2Env struct {
-		PMCwd string `json:"pm_cwd"`
-	}
-	type pm2Entry struct {
-		Name   string `json:"name"`
-		PM2Env pm2Env `json:"pm2_env"`
-	}
-	var entries []pm2Entry
-	if err := json.Unmarshal(b, &entries); err != nil {
-		return nil
-	}
-	out := []string{}
-	for _, e := range entries {
-		n := strings.ToLower(strings.TrimSpace(e.Name))
-		if !strings.Contains(n, "rustdesk") && n != "hbbs" && n != "hbbr" {
-			continue
-		}
-		if strings.TrimSpace(e.PM2Env.PMCwd) != "" {
-			out = append(out, e.PM2Env.PMCwd)
-		}
-	}
-	return dedupe(out)
-}
-
-func detectWindowsServiceCandidates() []string {
-	if !hasCmd("powershell") {
-		return nil
-	}
-	script := `$names=@('rustdesk-hbbs','rustdesk-hbbr','rustdesksignal','rustdeskrelay','hbbs','hbbr');
-foreach($n in $names){
-  $p1="HKLM:\SYSTEM\CurrentControlSet\Services\$n\Parameters"
-  try{$app=(Get-ItemProperty -Path $p1 -ErrorAction Stop).AppDirectory; if($app){$app}}catch{}
-  $p2="HKLM:\SYSTEM\CurrentControlSet\Services\$n"
-  try{
-    $img=(Get-ItemProperty -Path $p2 -ErrorAction Stop).ImagePath
-    if($img){
-      $expanded=[Environment]::ExpandEnvironmentVariables($img)
-      $m=[regex]::Match($expanded,'^\"?([^\" ]+\.exe)')
-      if($m.Success){Split-Path -Parent $m.Groups[1].Value}
-    }
-  }catch{}
-}`
-	b, err := exec.Command("powershell", "-NoProfile", "-Command", script).Output()
-	if err != nil || len(b) == 0 {
-		return nil
-	}
-	out := []string{}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			out = append(out, line)
-		}
-	}
-	return dedupe(out)
-}
-
-func detectWindowsProcessCandidates() []string {
-	if !hasCmd("powershell") {
-		return nil
-	}
-	script := `Get-Process -Name hbbs,hbbr,rustdesksignal,rustdeskrelay -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path`
-	b, err := exec.Command("powershell", "-NoProfile", "-Command", script).Output()
-	if err != nil || len(b) == 0 {
-		return nil
-	}
-	out := []string{}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		out = append(out, filepath.Dir(line))
-	}
-	return dedupe(out)
-}
-
-func hasCmd(name string) bool {
-	_, err := exec.LookPath(name)
-	return err == nil
-}
-
-func dedupe(in []string) []string {
-	seen := map[string]bool{}
-	out := []string{}
-	for _, v := range in {
-		v = strings.TrimSpace(v)
-		if v == "" || seen[v] {
-			continue
-		}
-		seen[v] = true
-		out = append(out, v)
-	}
-	return out
-}
-
-func isDir(path string) bool {
-	st, err := os.Stat(path)
-	return err == nil && st.IsDir()
-}
-
-func collectFiles(dataDir string) ([]string, error) {
-	files := []string{}
-	for _, name := range []string{"id_ed25519", "id_ed25519.pub"} {
-		p := filepath.Join(dataDir, name)
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			files = append(files, p)
-		}
-	}
-
-	patterns := []string{"db_v2.sqlite3*", "db.sqlite3*"}
-	for _, p := range patterns {
-		matched, err := filepath.Glob(filepath.Join(dataDir, p))
-		if err != nil {
-			return nil, err
-		}
-		for _, m := range matched {
-			if st, err := os.Stat(m); err == nil && !st.IsDir() {
-				files = append(files, m)
-			}
-		}
-	}
-
-	uniq := map[string]bool{}
-	out := []string{}
+	defer os.RemoveAll(verifyDir)
+	entries := []archiveEntry{}
 	for _, f := range files {
-		if !uniq[f] {
-			uniq[f] = true
-			out = append(out, f)
+		rel, err := filepath.Rel(verifyDir, f)
+		if err != nil {
+			return err
+		}
+		entries = append(entries, archiveEntry{Src: f, Dst: filepath.ToSlash(rel)})
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	newPath := filepath.Join(tmpDir, filepath.Base(path))
+	if sourceOS == "windows" {
+		if err := writeZip(newPath, entries, data); err != nil {
+			return err
+		}
+	} else {
+		if err := writeTarGz(newPath, entries, data); err != nil {
+			return err
 		}
 	}
-	return out, nil
+	return os.Rename(newPath, path)
 }
 
-func writeZip(out string, files []string) error {
+func RewriteArchiveManifest(path string, entries []ArchiveRewriteEntry, manifest bundle.Manifest) error {
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	internalEntries := make([]archiveEntry, 0, len(entries))
+	for _, entry := range entries {
+		internalEntries = append(internalEntries, archiveEntry{Src: entry.Src, Dst: entry.Dst})
+	}
+	tmpDir, err := os.MkdirTemp("", "rustdesk-friendly-archive-rewrite-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+	newPath := filepath.Join(tmpDir, filepath.Base(path))
+	if strings.HasSuffix(strings.ToLower(path), ".zip") {
+		if err := writeZip(newPath, internalEntries, data); err != nil {
+			return err
+		}
+	} else {
+		if err := writeTarGz(newPath, internalEntries, data); err != nil {
+			return err
+		}
+	}
+	return os.Rename(newPath, path)
+}
+
+func writeZip(out string, entries []archiveEntry, manifest []byte) error {
 	f, err := os.Create(out)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-
 	zw := zip.NewWriter(f)
 	defer zw.Close()
-
-	for _, src := range files {
-		if err := addZipFile(zw, src, filepath.Base(src)); err != nil {
+	for _, entry := range entries {
+		if entry.Kind == "logs" && isDir(entry.Src) {
+			if err := writeLogSnapshotZip(zw, entry); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := addZipFile(zw, entry.Src, entry.Dst); err != nil {
 			return err
 		}
 	}
-	return nil
+	w, err := zw.Create(bundle.ManifestName)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(manifest)
+	return err
+}
+
+func writeTarGz(out string, entries []archiveEntry, manifest []byte) error {
+	f, err := os.Create(out)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	gz := gzip.NewWriter(f)
+	defer gz.Close()
+	tw := tar.NewWriter(gz)
+	defer tw.Close()
+	for _, entry := range entries {
+		if entry.Kind == "logs" && isDir(entry.Src) {
+			if err := writeLogSnapshotTar(tw, entry); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := addTarFile(tw, entry.Src, entry.Dst); err != nil {
+			return err
+		}
+	}
+	return addTarBytes(tw, bundle.ManifestName, manifest)
+}
+
+func writeLogSnapshotZip(zw *zip.Writer, entry archiveEntry) error {
+	data, err := json.MarshalIndent(map[string]any{
+		"log_dir": entry.Src,
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	w, err := zw.Create(entry.Dst)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(data)
+	return err
+}
+
+func writeLogSnapshotTar(tw *tar.Writer, entry archiveEntry) error {
+	data, err := json.MarshalIndent(map[string]any{
+		"log_dir": entry.Src,
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return addTarBytes(tw, entry.Dst, data)
 }
 
 func addZipFile(zw *zip.Writer, src, name string) error {
@@ -366,36 +521,12 @@ func addZipFile(zw *zip.Writer, src, name string) error {
 	return err
 }
 
-func writeTarGz(out string, files []string) error {
-	f, err := os.Create(out)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	gz := gzip.NewWriter(f)
-	defer gz.Close()
-	tw := tar.NewWriter(gz)
-	defer tw.Close()
-
-	for _, src := range files {
-		if err := addTarFile(tw, src, filepath.Base(src)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func addTarFile(tw *tar.Writer, src, name string) error {
 	st, err := os.Stat(src)
 	if err != nil {
 		return err
 	}
-	h := &tar.Header{
-		Name:    name,
-		Mode:    int64(st.Mode().Perm()),
-		Size:    st.Size(),
-		ModTime: st.ModTime(),
-	}
+	h := &tar.Header{Name: name, Mode: int64(st.Mode().Perm()), Size: st.Size(), ModTime: st.ModTime()}
 	if err := tw.WriteHeader(h); err != nil {
 		return err
 	}
@@ -408,15 +539,64 @@ func addTarFile(tw *tar.Writer, src, name string) error {
 	return err
 }
 
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
+func addTarBytes(tw *tar.Writer, name string, data []byte) error {
+	h := &tar.Header{Name: name, Mode: 0o644, Size: int64(len(data))}
+	if err := tw.WriteHeader(h); err != nil {
+		return err
 	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+	_, err := tw.Write(data)
+	return err
+}
+
+func normalizeOS(v string) string {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if v == "" {
+		if runtime.GOOS == "windows" {
+			return "windows"
+		}
+		return runtime.GOOS
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return v
+}
+
+func sanitizeName(path string) string {
+	path = strings.ReplaceAll(path, ":", "")
+	path = strings.ReplaceAll(path, `\`, "_")
+	path = strings.ReplaceAll(path, "/", "_")
+	return path
+}
+
+func isFile(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && !st.IsDir()
+}
+
+func isDir(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.IsDir()
+}
+
+func logResult(out io.Writer, result Result) {
+	if out == nil {
+		return
+	}
+	fmt.Fprintln(out, "[SAFE] Backup is read-only: no service stop, no source file modification, no deletion.")
+	fmt.Fprintf(out, "[OK] Source runtime: %s/%s\n", result.DetectedRuntime.OS, result.DetectedRuntime.Arch)
+	fmt.Fprintf(out, "[OK] Service manager: %s\n", emptyOr(result.ServiceManager, "not detected"))
+	fmt.Fprintf(out, "[OK] Verification level: %s\n", result.VerificationLevel)
+	fmt.Fprintf(out, "[OK] Archive: %s\n", result.ArchivePath)
+	fmt.Fprintf(out, "[OK] SHA256: %s\n", result.SHA256)
+	for _, check := range result.Checks {
+		fmt.Fprintf(out, "[CHECK] %s\n", check)
+	}
+	for _, warning := range result.Warnings {
+		fmt.Fprintf(out, "[WARN] %s\n", warning)
+	}
+}
+
+func emptyOr(v, fallback string) string {
+	if strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	return v
 }

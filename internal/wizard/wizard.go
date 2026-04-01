@@ -12,8 +12,11 @@ import (
 	"strings"
 
 	"github.com/lovitus/rustdesk-server-friendly/internal/backup"
+	"github.com/lovitus/rustdesk-server-friendly/internal/doctor"
 	"github.com/lovitus/rustdesk-server-friendly/internal/guide"
+	"github.com/lovitus/rustdesk-server-friendly/internal/install"
 	"github.com/lovitus/rustdesk-server-friendly/internal/restore"
+	"github.com/lovitus/rustdesk-server-friendly/internal/runtimeinfo"
 )
 
 type Options struct {
@@ -22,168 +25,145 @@ type Options struct {
 
 func Run(in io.Reader, out io.Writer, opts Options) error {
 	reader := bufio.NewReader(in)
-
-	fmt.Fprintln(out, "RustDesk Server Friendly")
-	fmt.Fprintln(out, "Choose what to execute:")
+	fmt.Fprintln(out, "RustDesk Friendly")
+	fmt.Fprintln(out, "Choose what to do:")
 	fmt.Fprintln(out)
 
-	action, err := promptChoice(reader, out, "Action", []string{"backup", "import", "generate-guide"}, "backup")
+	action, err := promptChoice(reader, out, "Action", []string{"new-service", "backup-migrate", "restore-service", "diagnose-repair", "advanced-mode"}, "backup-migrate")
 	if err != nil {
 		return err
 	}
 
 	switch action {
-	case "backup":
+	case "new-service":
+		return runInstallFlow(reader, out)
+	case "backup-migrate":
 		return runBackupFlow(reader, out)
-	case "import":
-		return runImportFlow(reader, out)
+	case "restore-service":
+		return runRestoreFlow(reader, out)
+	case "diagnose-repair":
+		doctor.Run(out)
+		return nil
 	default:
-		return runGuideFlow(reader, out, opts)
+		return runAdvancedFlow(reader, out, opts)
 	}
 }
 
+func runInstallFlow(reader *bufio.Reader, out io.Writer) error {
+	rt := runtimeinfo.Detect("")
+	confirmed, err := requireTripleConfirmationIfNeeded(reader, out, rt.ExistingService || len(runtimeinfo.PortConflicts(rt.Ports)) > 0 || rt.DataDir != "")
+	if err != nil {
+		return err
+	}
+	_, err = install.Run(install.Options{
+		TargetOS:        hostOS(),
+		TripleConfirmed: confirmed,
+		Out:             out,
+	})
+	return err
+}
+
 func runBackupFlow(reader *bufio.Reader, out io.Writer) error {
-	defaultOS := hostOS()
-	sourceOS, err := promptChoice(reader, out, "Source OS", []string{"windows", "linux"}, defaultOS)
+	sourceOS, err := promptChoice(reader, out, "Source OS", []string{"windows", "linux", "darwin"}, hostOS())
 	if err != nil {
 		return err
 	}
-
-	autoDetect, err := promptYesNo(reader, out, "Auto-detect source data directory?", true)
+	output, err := promptText(reader, out, "Backup archive output", defaultBackupOutput(sourceOS))
 	if err != nil {
 		return err
 	}
-	sourceDir := ""
-	if !autoDetect {
-		sourceDir, err = promptText(reader, out, "Source data dir", defaultSourceDir(sourceOS))
-		if err != nil {
-			return err
-		}
-	}
-
-	defaultOut := defaultBackupOutput(sourceOS)
-	output, err := promptText(reader, out, "Backup archive output", defaultOut)
-	if err != nil {
-		return err
-	}
-	absOut, _ := filepath.Abs(output)
-
 	force := false
+	absOut, _ := filepath.Abs(output)
 	if st, err := os.Stat(absOut); err == nil && !st.IsDir() {
 		force, err = promptYesNo(reader, out, "Output exists. Overwrite?", false)
 		if err != nil {
 			return err
 		}
 		if !force {
-			return fmt.Errorf("aborted by user: output already exists")
+			return errors.New("aborted by user")
 		}
 	}
-
-	for attempt := 0; attempt < 2; attempt++ {
-		_, err = backup.Run(backup.Options{
-			SourceOS:      sourceOS,
-			SourceDataDir: sourceDir,
-			Output:        absOut,
-			Force:         force,
-			Out:           out,
-		})
-		if err == nil {
-			return nil
-		}
-		if attempt == 0 && autoDetect && strings.Contains(strings.ToLower(err.Error()), "cannot detect rustdesk source data dir") {
-			fmt.Fprintln(out, "[WARN] Auto-detect failed. Please input source data directory manually.")
-			sourceDir, _ = promptText(reader, out, "Source data dir", defaultSourceDir(sourceOS))
-			continue
-		}
-		return err
-	}
-	return errors.New("backup failed")
-}
-
-func runImportFlow(reader *bufio.Reader, out io.Writer) error {
-	defaultOS := hostOS()
-	targetOS, err := promptChoice(reader, out, "Target OS", []string{"windows", "linux"}, defaultOS)
-	if err != nil {
-		return err
-	}
-
-	archive, err := promptText(reader, out, "Backup archive path (.zip/.tgz/.tar.gz)", "")
-	if err != nil {
-		return err
-	}
-	archive = strings.TrimSpace(strings.Trim(archive, `"`))
-	for {
-		if archive == "" {
-			archive, _ = promptText(reader, out, "Backup archive path (.zip/.tgz/.tar.gz)", "")
-			archive = strings.TrimSpace(strings.Trim(archive, `"`))
-			continue
-		}
-		if st, err := os.Stat(archive); err == nil && !st.IsDir() {
-			break
-		}
-		fmt.Fprintln(out, "File not found. Please input a valid archive file path.")
-		archive, _ = promptText(reader, out, "Backup archive path (.zip/.tgz/.tar.gz)", "")
-		archive = strings.TrimSpace(strings.Trim(archive, `"`))
-	}
-
-	autoDetect, err := promptYesNo(reader, out, "Auto-detect target data directory?", true)
-	if err != nil {
-		return err
-	}
-	targetDir := ""
-	if !autoDetect {
-		targetDir, err = promptText(reader, out, "Target data dir", defaultTargetDir(targetOS))
-		if err != nil {
-			return err
-		}
-	}
-
-	force, err := promptYesNo(reader, out, "Allow overwrite when target already has key/db files?", false)
-	if err != nil {
-		return err
-	}
-
-	_, err = restore.Run(restore.Options{
-		TargetOS:      targetOS,
-		Archive:       archive,
-		TargetDataDir: targetDir,
-		Force:         force,
-		Out:           out,
+	_, err = backup.Run(backup.Options{
+		SourceOS: sourceOS,
+		Output:   absOut,
+		Force:    force,
+		Out:      out,
 	})
 	return err
 }
 
-func runGuideFlow(reader *bufio.Reader, out io.Writer, opts Options) error {
+func runRestoreFlow(reader *bufio.Reader, out io.Writer) error {
+	targetOS, err := promptChoice(reader, out, "Target OS", []string{"windows", "linux", "darwin"}, hostOS())
+	if err != nil {
+		return err
+	}
+	archivePath, err := promptExistingFile(reader, out, "Backup archive path")
+	if err != nil {
+		return err
+	}
+	liveVerify, err := promptYesNo(reader, out, "Run isolated live-restore verification after restore?", true)
+	if err != nil {
+		return err
+	}
+	rt := runtimeinfo.Detect(targetOS)
+	confirmed, err := requireTripleConfirmationIfNeeded(reader, out, rt.ExistingService || rt.DataDir != "")
+	if err != nil {
+		return err
+	}
+	res, err := restore.Run(restore.Options{
+		TargetOS:        targetOS,
+		Archive:         archivePath,
+		Force:           true,
+		LiveVerify:      liveVerify,
+		TripleConfirmed: confirmed,
+		Out:             out,
+	})
+	if err != nil {
+		return err
+	}
+	if liveVerify && res.IsolatedValidationDataDir != "" {
+		ok, err := promptYesNo(reader, out, "Did the isolated restore validate successfully and leave clients unaffected?", false)
+		if err != nil {
+			return err
+		}
+		if ok {
+			_, err = restore.Run(restore.Options{
+				TargetOS:          targetOS,
+				Archive:           archivePath,
+				TargetDataDir:     res.TargetDataDir,
+				ValidateOnly:      true,
+				LiveVerify:        true,
+				UserConfirmedLive: true,
+				TripleConfirmed:   true,
+				Out:               out,
+			})
+			return err
+		}
+	}
+	return nil
+}
+
+func runAdvancedFlow(reader *bufio.Reader, out io.Writer, opts Options) error {
+	action, err := promptChoice(reader, out, "Advanced action", []string{"generate-guide", "run-guide-topic"}, "generate-guide")
+	if err != nil {
+		return err
+	}
 	cfg := guide.DefaultConfig()
-	var err error
-
-	cfg.Target, err = promptChoice(reader, out, "Target", guide.SupportedTargets, cfg.Target)
-	if err != nil {
-		return err
+	if action == "run-guide-topic" {
+		cfg.Target, err = promptChoice(reader, out, "Target", guide.SupportedTargets, cfg.Target)
+		if err != nil {
+			return err
+		}
+		cfg.Topic, err = promptChoice(reader, out, "Topic", guide.SupportedTopics, cfg.Topic)
+		if err != nil {
+			return err
+		}
 	}
-	cfg.Topic, err = promptChoice(reader, out, "Topic", guide.SupportedTopics, cfg.Topic)
-	if err != nil {
-		return err
-	}
-	if cfg.Topic == "migrate" {
-		cfg.MigrationSourceOS, _ = promptChoice(reader, out, "Migration source OS", guide.SupportedMigrationOS, cfg.MigrationSourceOS)
-		cfg.MigrationTargetOS, _ = promptChoice(reader, out, "Migration target OS", guide.SupportedMigrationOS, cfg.MigrationTargetOS)
-	}
-	if cfg.Topic != "migrate" {
-		cfg.Host, _ = promptText(reader, out, "Public host/IP used by hbbs -r", cfg.Host)
-	}
-
 	rendered, err := guide.Render(cfg)
 	if err != nil {
 		return err
 	}
-
-	if cfg.Topic == "migrate" {
-		fmt.Fprintln(out, "[IMPORTANT] This is a generated guide only. It does NOT execute migration.")
-	}
-	fmt.Fprint(out, "\n===== Generated Guide =====\n\n")
 	fmt.Fprintln(out, rendered)
-
 	output := strings.TrimSpace(opts.Output)
 	if output == "" {
 		save, err := promptYesNo(reader, out, "Export guide to file?", true)
@@ -191,64 +171,86 @@ func runGuideFlow(reader *bufio.Reader, out io.Writer, opts Options) error {
 			return err
 		}
 		if save {
-			def := defaultFilename(cfg)
-			output, err = promptText(reader, out, "Output file", def)
+			output, err = promptText(reader, out, "Output file", defaultFilename(cfg))
 			if err != nil {
 				return err
 			}
 		}
 	}
-
 	if strings.TrimSpace(output) != "" {
-		absOut, err := filepath.Abs(output)
-		if err != nil {
-			absOut = output
-		}
-		if err := os.MkdirAll(filepath.Dir(absOut), 0o755); err != nil {
+		output, _ = filepath.Abs(output)
+		if err := os.WriteFile(output, []byte(rendered), 0o644); err != nil {
 			return err
 		}
-		if err := os.WriteFile(absOut, []byte(rendered), 0o644); err != nil {
-			return err
-		}
-		st, err := os.Stat(absOut)
+		st, err := os.Stat(output)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "Saved: %s (%d bytes)\n", absOut, st.Size())
+		fmt.Fprintf(out, "Saved: %s (%d bytes)\n", output, st.Size())
 	}
 	return nil
 }
 
+func requireTripleConfirmationIfNeeded(reader *bufio.Reader, out io.Writer, needed bool) (bool, error) {
+	if !needed {
+		return true, nil
+	}
+	fmt.Fprintln(out, "[WARN] Existing RustDesk service, data, or ports were detected.")
+	asks := []string{
+		"Confirm that you understand existing RustDesk service or data was detected",
+		"Confirm that you allow the program to take over and modify the target side",
+		"Confirm that you understand rollback is automatic but manual intervention may still be required",
+	}
+	for _, ask := range asks {
+		ok, err := promptYesNo(reader, out, ask, false)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			return false, errors.New("aborted: triple confirmation not completed")
+		}
+	}
+	return true, nil
+}
+
 func hostOS() string {
-	if runtime.GOOS == "windows" {
-		return "windows"
+	switch runtime.GOOS {
+	case "windows", "darwin":
+		return runtime.GOOS
+	default:
+		return "linux"
 	}
-	return "linux"
-}
-
-func defaultSourceDir(osName string) string {
-	if osName == "windows" {
-		return `C:\RustDesk-Server\data`
-	}
-	return "/var/lib/rustdesk-server"
-}
-
-func defaultTargetDir(osName string) string {
-	return defaultSourceDir(osName)
 }
 
 func defaultBackupOutput(sourceOS string) string {
-	if sourceOS == "windows" {
-		return `C:\rustdesk-migration-backup\rustdesk-migration-backup.zip`
+	switch sourceOS {
+	case "windows":
+		return `C:\rustdesk-migration-backup\rustdesk-lifecycle-backup.zip`
+	default:
+		return "/tmp/rustdesk-lifecycle-backup.tgz"
 	}
-	return "/tmp/rustdesk-migration-backup.tgz"
 }
 
 func defaultFilename(cfg guide.Config) string {
-	if cfg.Topic == "migrate" {
-		return fmt.Sprintf("rustdesk-%s-to-%s-migration.md", cfg.MigrationSourceOS, cfg.MigrationTargetOS)
-	}
 	return fmt.Sprintf("rustdesk-%s-%s-guide.md", cfg.Target, cfg.Topic)
+}
+
+func promptExistingFile(reader *bufio.Reader, out io.Writer, label string) (string, error) {
+	for {
+		path, err := promptText(reader, out, label, "")
+		if err != nil {
+			return "", err
+		}
+		path = strings.TrimSpace(strings.Trim(path, `"`))
+		if path == "" {
+			fmt.Fprintln(out, "Please enter a file path.")
+			continue
+		}
+		if st, err := os.Stat(path); err == nil && !st.IsDir() {
+			return path, nil
+		}
+		fmt.Fprintln(out, "File not found. Try again.")
+	}
 }
 
 func promptText(reader *bufio.Reader, out io.Writer, label, def string) (string, error) {
@@ -320,6 +322,6 @@ func promptYesNo(reader *bufio.Reader, out io.Writer, label string, defaultYes b
 		if line == "n" || line == "no" {
 			return false, nil
 		}
-		fmt.Fprintln(out, "Please answer y or n.")
+		fmt.Fprintln(out, "Please answer yes or no.")
 	}
 }

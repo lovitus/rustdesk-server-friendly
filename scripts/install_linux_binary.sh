@@ -34,6 +34,7 @@ ARCH=$(uname -m)
 case "$ARCH" in
   x86_64) ASSET="rustdesk-friendly-linux-amd64" ;;
   aarch64|arm64) ASSET="rustdesk-friendly-linux-arm64" ;;
+  armv7l|armv7) ASSET="rustdesk-friendly-linux-armv7" ;;
   *) echo "[STOP] unsupported arch: $ARCH"; exit 1 ;;
 esac
 

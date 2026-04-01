@@ -1,0 +1,43 @@
+package service
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestApplyLinuxWritesUnitsWhenSystemctlSkipped(t *testing.T) {
+	unitDir := filepath.Join(t.TempDir(), "systemd")
+	t.Setenv("RUSTDESK_FRIENDLY_SYSTEMD_DIR", unitDir)
+	t.Setenv("RUSTDESK_FRIENDLY_SKIP_SYSTEMCTL", "1")
+	tmp := t.TempDir()
+	logDir := filepath.Join(tmp, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Apply(Config{
+		OS:          "linux",
+		ServiceName: "rustdesk",
+		DataDir:     filepath.Join(tmp, "data"),
+		InstallDir:  filepath.Join(tmp, "bin"),
+		LogDir:      logDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.UnitPaths) != 2 {
+		t.Fatalf("expected 2 unit paths, got %d", len(res.UnitPaths))
+	}
+	for _, path := range res.UnitPaths {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestDetectWindowsManagerEnvOverride(t *testing.T) {
+	t.Setenv("RUSTDESK_FRIENDLY_WINDOWS_SERVICE_MANAGER", "pm2")
+	if got := detectWindowsManager(); got != "pm2" {
+		t.Fatalf("expected pm2, got %s", got)
+	}
+}

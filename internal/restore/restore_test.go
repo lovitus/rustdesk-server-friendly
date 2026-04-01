@@ -1,23 +1,35 @@
 package restore
 
 import (
-	"archive/zip"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/lovitus/rustdesk-server-friendly/internal/backup"
 )
 
 func TestRunImportZipToLinuxDir(t *testing.T) {
+	tmpRoot := t.TempDir()
+	t.Setenv("RUSTDESK_FRIENDLY_SKIP_DOWNLOAD", "1")
+	t.Setenv("RUSTDESK_FRIENDLY_SKIP_SYSTEMCTL", "1")
+	t.Setenv("RUSTDESK_FRIENDLY_SYSTEMD_DIR", filepath.Join(tmpRoot, "systemd"))
+	t.Setenv("RUSTDESK_FRIENDLY_INSTALL_DIR", filepath.Join(tmpRoot, "install"))
 	tmp := t.TempDir()
+	source := filepath.Join(tmp, "source")
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(source, "id_ed25519"), "priv")
+	mustWrite(t, filepath.Join(source, "id_ed25519.pub"), "pub")
+	mustWrite(t, filepath.Join(source, "db_v2.sqlite3"), "db")
+
 	archive := filepath.Join(tmp, "backup.zip")
-	makeZip(t, archive, map[string]string{
-		"id_ed25519":     "priv",
-		"id_ed25519.pub": "pub",
-		"db_v2.sqlite3":  "db",
-	})
+	if _, err := backup.Run(backup.Options{SourceOS: "windows", SourceDataDir: source, Output: archive}); err != nil {
+		t.Fatal(err)
+	}
 
 	target := filepath.Join(tmp, "target")
-	res, err := Run(Options{TargetOS: "linux", Archive: archive, TargetDataDir: target, Force: true})
+	res, err := Run(Options{TargetOS: "linux", Archive: archive, TargetDataDir: target, Force: true, TripleConfirmed: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,34 +41,55 @@ func TestRunImportZipToLinuxDir(t *testing.T) {
 	}
 }
 
+func TestRunLiveVerifyWritesStateAndConfirmation(t *testing.T) {
+	tmpRoot := t.TempDir()
+	t.Setenv("RUSTDESK_FRIENDLY_SKIP_DOWNLOAD", "1")
+	t.Setenv("RUSTDESK_FRIENDLY_SKIP_SYSTEMCTL", "1")
+	t.Setenv("RUSTDESK_FRIENDLY_SYSTEMD_DIR", filepath.Join(tmpRoot, "systemd"))
+	t.Setenv("RUSTDESK_FRIENDLY_INSTALL_DIR", filepath.Join(tmpRoot, "install"))
+	tmp := t.TempDir()
+	source := filepath.Join(tmp, "source")
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(source, "id_ed25519"), "priv")
+	mustWrite(t, filepath.Join(source, "id_ed25519.pub"), "pub")
+	mustWrite(t, filepath.Join(source, "db_v2.sqlite3"), "db")
+	archive := filepath.Join(tmp, "backup.tgz")
+	if _, err := backup.Run(backup.Options{SourceOS: "linux", SourceDataDir: source, Output: archive}); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(tmp, "target")
+	res, err := Run(Options{TargetOS: "linux", Archive: archive, TargetDataDir: target, Force: true, TripleConfirmed: true, LiveVerify: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsolatedValidationDataDir == "" {
+		t.Fatal("expected isolated validation dir")
+	}
+	if _, err := os.Stat(filepath.Join(res.IsolatedValidationDataDir, ".rustdesk-friendly-live-verify.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(Options{TargetOS: "linux", Archive: archive, TargetDataDir: target, ValidateOnly: true, UserConfirmedLive: true, TripleConfirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRunRejectsInvalidArchive(t *testing.T) {
 	tmp := t.TempDir()
 	archive := filepath.Join(tmp, "invalid.zip")
-	makeZip(t, archive, map[string]string{"random.txt": "nope"})
+	if err := os.WriteFile(archive, []byte("not-a-valid-archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	_, err := Run(Options{TargetOS: "linux", Archive: archive, TargetDataDir: filepath.Join(tmp, "target")})
 	if err == nil {
 		t.Fatal("expected error")
 	}
 }
 
-func makeZip(t *testing.T, path string, files map[string]string) {
+func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
-	f, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	zw := zip.NewWriter(f)
-	for n, c := range files {
-		w, err := zw.Create(n)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := w.Write([]byte(c)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := zw.Close(); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
