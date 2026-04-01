@@ -58,6 +58,11 @@ type Result struct {
 	ClientTemplatePaths        map[string]string
 }
 
+type restorePlanItem struct {
+	src string
+	dst string
+}
+
 func Run(opts Options) (Result, error) {
 	targetOS := normalizeOS(opts.TargetOS)
 	rt := runtimeinfo.Detect(targetOS)
@@ -133,7 +138,17 @@ func Run(opts Options) (Result, error) {
 	defer os.RemoveAll(stagingDir)
 
 	result.Checks = append(result.Checks, "archive extracted into staging area")
-	conflicts := existingConflicts(targetDataDir, files)
+	restoreBase := targetDataDir
+	if opts.LiveVerify {
+		restoreBase = isolatedDataDir(targetDataDir)
+		result.IsolatedValidationDataDir = restoreBase
+	}
+	installDir := effectiveInstallDir(rt)
+	plans, err := buildRestorePlan(stagingDir, files, restoreBase, installDir)
+	if err != nil {
+		return result, err
+	}
+	conflicts := existingConflicts(plans)
 	if len(conflicts) > 0 && !opts.Force {
 		result.BlockingIssues = append(result.BlockingIssues, fmt.Sprintf("target contains %d conflicting files", len(conflicts)))
 		return result, errors.New(result.BlockingIssues[0])
@@ -162,16 +177,11 @@ func Run(opts Options) (Result, error) {
 		return result, nil
 	}
 
-	restoreBase := targetDataDir
-	if opts.LiveVerify {
-		restoreBase = isolatedDataDir(targetDataDir)
-		result.IsolatedValidationDataDir = restoreBase
-	}
 	if err := os.MkdirAll(restoreBase, 0o755); err != nil {
 		return result, err
 	}
 
-	restored, err := restoreFiles(files, restoreBase)
+	restored, err := restoreFiles(plans)
 	if err != nil {
 		_ = rollback(targetDataDir, preBackupDir, conflicts, opts.Out)
 		return result, err
@@ -282,12 +292,11 @@ func backupExtract(archivePath string) (string, []string, bundle.Manifest, error
 	return backup.ExtractArchiveForRestore(archivePath)
 }
 
-func existingConflicts(targetDir string, extracted []string) []string {
+func existingConflicts(plans []restorePlanItem) []string {
 	out := []string{}
-	for _, f := range extracted {
-		p := filepath.Join(targetDir, filepath.Base(f))
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			out = append(out, p)
+	for _, plan := range plans {
+		if st, err := os.Stat(plan.dst); err == nil && !st.IsDir() {
+			out = append(out, plan.dst)
 		}
 	}
 	return out
@@ -303,7 +312,7 @@ func backupCurrentTarget(targetDir string, conflicts []string) (string, []string
 	}
 	rollbackFiles := []string{}
 	for _, src := range conflicts {
-		dst := filepath.Join(backupDir, filepath.Base(src))
+		dst := backupCopyPath(backupDir, src)
 		if err := common.CopyFile(src, dst); err != nil {
 			return "", nil, err
 		}
@@ -312,15 +321,13 @@ func backupCurrentTarget(targetDir string, conflicts []string) (string, []string
 	return backupDir, rollbackFiles, nil
 }
 
-func restoreFiles(files []string, targetDir string) ([]string, error) {
+func restoreFiles(plans []restorePlanItem) ([]string, error) {
 	restored := []string{}
-	for _, extracted := range files {
-		base := filepath.Base(extracted)
-		dst := filepath.Join(targetDir, base)
-		if err := common.CopyFile(extracted, dst); err != nil {
+	for _, plan := range plans {
+		if err := common.CopyFile(plan.src, plan.dst); err != nil {
 			return nil, err
 		}
-		restored = append(restored, dst)
+		restored = append(restored, plan.dst)
 	}
 	return restored, nil
 }
@@ -331,7 +338,7 @@ func rollback(targetDir, preBackupDir string, conflicts []string, out io.Writer)
 	}
 	logf(out, "[ROLLBACK] restoring pre-import files from %s", preBackupDir)
 	for _, conflict := range conflicts {
-		src := filepath.Join(preBackupDir, filepath.Base(conflict))
+		src := backupCopyPath(preBackupDir, conflict)
 		if err := common.CopyFile(src, conflict); err != nil {
 			return err
 		}
@@ -340,7 +347,7 @@ func rollback(targetDir, preBackupDir string, conflicts []string, out io.Writer)
 }
 
 func ensureTargetBinaries(rt runtimeinfo.Runtime, manifest bundle.Manifest, out io.Writer) error {
-	if len(rt.BinaryPaths) > 0 {
+	if len(rt.BinaryPaths) > 0 || binariesPresent(effectiveInstallDir(rt), rt.OS) {
 		return nil
 	}
 	logf(out, "[CHECK] target binaries were not detected; downloading upstream binaries for %s/%s", rt.OS, rt.Arch)
@@ -360,6 +367,59 @@ func ensureTargetBinaries(rt runtimeinfo.Runtime, manifest bundle.Manifest, out 
 		return err
 	}
 	return nil
+}
+
+func buildRestorePlan(stagingDir string, files []string, targetDataDir, installDir string) ([]restorePlanItem, error) {
+	plans := make([]restorePlanItem, 0, len(files))
+	metadataDir := filepath.Join(targetDataDir, ".rustdesk-friendly-bundle")
+	for _, file := range files {
+		rel, err := filepath.Rel(stagingDir, file)
+		if err != nil {
+			return nil, err
+		}
+		rel = filepath.ToSlash(rel)
+		clean := filepath.ToSlash(filepath.Clean(rel))
+		if strings.HasPrefix(clean, "../") || clean == "." {
+			return nil, fmt.Errorf("invalid extracted path: %s", rel)
+		}
+		var dst string
+		switch {
+		case strings.HasPrefix(clean, "data/"):
+			dst = filepath.Join(targetDataDir, filepath.Base(clean))
+		case strings.HasPrefix(clean, "app/"):
+			dst = filepath.Join(installDir, filepath.Base(clean))
+		case strings.HasPrefix(clean, "service/"), strings.HasPrefix(clean, "logs/"), strings.HasPrefix(clean, "runtime/"), strings.HasPrefix(clean, "policy/"):
+			dst = filepath.Join(metadataDir, filepath.FromSlash(clean))
+		default:
+			return nil, fmt.Errorf("unsupported extracted path: %s", rel)
+		}
+		plans = append(plans, restorePlanItem{src: file, dst: dst})
+	}
+	return plans, nil
+}
+
+func backupCopyPath(backupDir, original string) string {
+	return filepath.Join(backupDir, sanitizeBackupPath(original))
+}
+
+func sanitizeBackupPath(path string) string {
+	path = strings.ReplaceAll(path, ":", "")
+	path = strings.ReplaceAll(path, `\`, "_")
+	path = strings.ReplaceAll(path, "/", "_")
+	return path
+}
+
+func binariesPresent(installDir, osName string) bool {
+	for _, name := range []string{"hbbs", "hbbr"} {
+		path := filepath.Join(installDir, name)
+		if osName == "windows" {
+			path += ".exe"
+		}
+		if st, err := os.Stat(path); err != nil || st.IsDir() {
+			return false
+		}
+	}
+	return true
 }
 
 func configureManagedServices(rt runtimeinfo.Runtime, dataDir string, isolated bool, out io.Writer) ([]string, string, string, []int, []string, []string, error) {

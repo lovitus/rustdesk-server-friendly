@@ -45,6 +45,12 @@ func TestRunImportZipToLinuxDir(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(target, ".rustdesk-friendly-verification-report.json")); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := os.Stat(filepath.Join(target, ".rustdesk-friendly-bundle", "runtime", "snapshot.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(target, ".rustdesk-friendly-bundle", "policy", "snapshot.json")); err != nil {
+		t.Fatal(err)
+	}
 	md, err := os.ReadFile(filepath.Join(target, "rustdesk-friendly-verification-report.md"))
 	if err != nil {
 		t.Fatal(err)
