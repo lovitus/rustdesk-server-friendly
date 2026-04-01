@@ -21,9 +21,10 @@ type Config struct {
 }
 
 type Result struct {
-	UnitPaths []string
-	Checks    []string
-	Warnings  []string
+	UnitPaths    []string
+	ServiceNames []string
+	Checks       []string
+	Warnings     []string
 }
 
 func Apply(cfg Config) (Result, error) {
@@ -95,7 +96,10 @@ WantedBy=multi-user.target
 	if err := os.WriteFile(hbbrUnit, []byte(hbbrContent), 0o644); err != nil {
 		return Result{}, err
 	}
-	res := Result{UnitPaths: []string{hbbsUnit, hbbrUnit}}
+	res := Result{
+		UnitPaths:    []string{hbbsUnit, hbbrUnit},
+		ServiceNames: []string{cfg.ServiceName + "-hbbs" + suffix, cfg.ServiceName + "-hbbr" + suffix},
+	}
 	if os.Getenv("RUSTDESK_FRIENDLY_SKIP_SYSTEMCTL") == "1" || runtime.GOOS != "linux" {
 		res.Warnings = append(res.Warnings, "systemctl execution skipped")
 		return res, nil
@@ -141,7 +145,10 @@ func applyWindows(cfg Config) (Result, error) {
 	if err := os.WriteFile(planPath, data, 0o644); err != nil {
 		return Result{}, err
 	}
-	res := Result{UnitPaths: []string{planPath}}
+	res := Result{
+		UnitPaths:    []string{planPath},
+		ServiceNames: []string{servicePayload["service_name_hbbs"], servicePayload["service_name_hbbr"]},
+	}
 	if runtime.GOOS != "windows" || os.Getenv("RUSTDESK_FRIENDLY_SKIP_SC") == "1" {
 		res.Warnings = append(res.Warnings, "windows service execution skipped")
 		return res, nil

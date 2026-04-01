@@ -78,6 +78,7 @@ Backup rules:
 - never deletes source files
 - packs data, detected binaries, detected service definitions, log snapshot metadata, and `manifest.json`
 - reopens the archive and verifies required restore content before returning success
+- in interactive mode, backup can immediately continue into isolated live-restore verification on the same host
 
 Verification levels:
 
@@ -97,6 +98,12 @@ Useful flags:
 - `--live-verify`
 - `--user-confirmed-live`
 - `--triple-confirmed`
+
+Interactive backup now also offers:
+
+- immediate isolated restore verification on the current host
+- service creation for `-verify` instances
+- operator confirmation to promote the archive from `restorable_verified` to `live_restore_verified`
 
 Restore behavior:
 

@@ -35,20 +35,22 @@ type Options struct {
 }
 
 type Result struct {
-	TargetDataDir             string
-	RestoredFiles             []string
-	PreBackupDir              string
-	Checks                    []string
-	Warnings                  []string
-	BlockingIssues            []string
-	DetectedRuntime           runtimeinfo.Runtime
-	ServiceManager            string
-	PackageContents           []bundle.FileEntry
-	RestorePlan               []string
-	RollbackState             []string
-	VerificationLevel         string
-	UserConfirmedLiveRestore  bool
-	IsolatedValidationDataDir string
+	TargetDataDir              string
+	RestoredFiles              []string
+	PreBackupDir               string
+	Checks                     []string
+	Warnings                   []string
+	BlockingIssues             []string
+	DetectedRuntime            runtimeinfo.Runtime
+	ServiceManager             string
+	PackageContents            []bundle.FileEntry
+	RestorePlan                []string
+	RollbackState              []string
+	VerificationLevel          string
+	UserConfirmedLiveRestore   bool
+	IsolatedValidationDataDir  string
+	IsolatedValidationServices []string
+	VerificationInstructions   []string
 }
 
 func Run(opts Options) (Result, error) {
@@ -165,11 +167,15 @@ func Run(opts Options) (Result, error) {
 	result.Checks = append(result.Checks, "target binaries are available or a download plan was prepared")
 
 	if rt.ManagedService && rt.OS != "darwin" {
-		if err := configureManagedServices(rt, restoreBase, opts.LiveVerify, opts.Out); err != nil {
+		svcNames, err := configureManagedServices(rt, restoreBase, opts.LiveVerify, opts.Out)
+		if err != nil {
 			if preBackupDir != "" {
 				_ = rollback(targetDataDir, preBackupDir, conflicts, opts.Out)
 			}
 			return result, err
+		}
+		if opts.LiveVerify {
+			result.IsolatedValidationServices = svcNames
 		}
 	}
 
@@ -184,6 +190,7 @@ func Run(opts Options) (Result, error) {
 	if opts.LiveVerify {
 		result.VerificationLevel = bundle.VerificationRestorable
 		result.Warnings = append(result.Warnings, "isolated live-restore environment is running side-by-side; wait for operator confirmation before marking success")
+		result.VerificationInstructions = verificationInstructions(rt, archivePath, restoreBase, result.IsolatedValidationServices)
 		if err := writeLiveVerifyState(restoreBase, archivePath, result.VerificationLevel, false); err != nil {
 			return result, err
 		}
@@ -289,9 +296,9 @@ func ensureTargetBinaries(rt runtimeinfo.Runtime, manifest bundle.Manifest, out 
 	return nil
 }
 
-func configureManagedServices(rt runtimeinfo.Runtime, dataDir string, isolated bool, out io.Writer) error {
+func configureManagedServices(rt runtimeinfo.Runtime, dataDir string, isolated bool, out io.Writer) ([]string, error) {
 	if !rt.ManagedService {
-		return nil
+		return nil, nil
 	}
 	installDir := defaultInstallDir(rt.OS)
 	if rt.InstallDir != "" {
@@ -311,7 +318,7 @@ func configureManagedServices(rt runtimeinfo.Runtime, dataDir string, isolated b
 		VerifyMode:  isolated,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, unit := range res.UnitPaths {
 		logf(out, "[CHECK] service artifact: %s", unit)
@@ -322,7 +329,7 @@ func configureManagedServices(rt runtimeinfo.Runtime, dataDir string, isolated b
 	for _, warning := range res.Warnings {
 		logf(out, "[WARN] %s", warning)
 	}
-	return nil
+	return res.ServiceNames, nil
 }
 
 func chooseBinary(rt runtimeinfo.Runtime, name string) string {
@@ -392,6 +399,28 @@ func writeLiveVerifyState(dir, archivePath, level string, confirmed bool) error 
 	return os.WriteFile(filepath.Join(dir, ".rustdesk-friendly-live-verify.json"), data, 0o644)
 }
 
+func verificationInstructions(rt runtimeinfo.Runtime, archivePath, dataDir string, serviceNames []string) []string {
+	lines := []string{
+		fmt.Sprintf("verification archive: %s", archivePath),
+		fmt.Sprintf("isolated data dir: %s", dataDir),
+	}
+	if len(serviceNames) > 0 {
+		lines = append(lines, "isolated services: "+strings.Join(serviceNames, ", "))
+	}
+	lines = append(lines,
+		"temporarily point a test client at the isolated verification server configuration",
+		"confirm the original production server continues serving clients without impact",
+		"confirm the isolated verification instance starts and accepts the expected RustDesk traffic",
+		"after validation, return to this tool and confirm live restore success to mark the archive as live_restore_verified",
+	)
+	if rt.OS == "windows" {
+		lines = append(lines, "on Windows, verify the temporary service instances in Services, NSSM, or pm2 depending on the detected manager")
+	} else if rt.OS == "linux" {
+		lines = append(lines, "on Linux, verify the temporary systemd units and listening sockets before client testing")
+	}
+	return lines
+}
+
 func hasExistingData(dir string) bool {
 	for _, name := range []string{"id_ed25519", "id_ed25519.pub", "db_v2.sqlite3", "db.sqlite3"} {
 		if st, err := os.Stat(filepath.Join(dir, name)); err == nil && !st.IsDir() {
@@ -448,11 +477,17 @@ func logResult(out io.Writer, result Result) {
 		fmt.Fprintf(out, "[OK] Isolated validation dir: %s\n", result.IsolatedValidationDataDir)
 	}
 	fmt.Fprintf(out, "[OK] Verification level: %s\n", result.VerificationLevel)
+	if len(result.IsolatedValidationServices) > 0 {
+		fmt.Fprintf(out, "[OK] Isolated services: %s\n", strings.Join(result.IsolatedValidationServices, ", "))
+	}
 	for _, check := range result.Checks {
 		fmt.Fprintf(out, "[CHECK] %s\n", check)
 	}
 	for _, warning := range result.Warnings {
 		fmt.Fprintf(out, "[WARN] %s\n", warning)
+	}
+	for _, line := range result.VerificationInstructions {
+		fmt.Fprintf(out, "[VERIFY] %s\n", line)
 	}
 }
 

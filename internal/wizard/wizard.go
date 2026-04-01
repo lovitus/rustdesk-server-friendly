@@ -83,11 +83,59 @@ func runBackupFlow(reader *bufio.Reader, out io.Writer) error {
 			return errors.New("aborted by user")
 		}
 	}
-	_, err = backup.Run(backup.Options{
+	backupRes, err := backup.Run(backup.Options{
 		SourceOS: sourceOS,
 		Output:   absOut,
 		Force:    force,
 		Out:      out,
+	})
+	if err != nil {
+		return err
+	}
+	if sourceOS != hostOS() {
+		fmt.Fprintln(out, "[WARN] Immediate live-restore verification is only available on the current local host runtime.")
+		return nil
+	}
+	runVerify, err := promptYesNo(reader, out, "Run isolated live-restore verification now?", true)
+	if err != nil {
+		return err
+	}
+	if !runVerify {
+		return nil
+	}
+	rt := runtimeinfo.Detect(sourceOS)
+	confirmed, err := requireTripleConfirmationIfNeeded(reader, out, rt.ExistingService || rt.DataDir != "")
+	if err != nil {
+		return err
+	}
+	res, err := restore.Run(restore.Options{
+		TargetOS:        sourceOS,
+		Archive:         backupRes.ArchivePath,
+		Force:           true,
+		LiveVerify:      true,
+		TripleConfirmed: confirmed,
+		Out:             out,
+	})
+	if err != nil {
+		return err
+	}
+	ok, err := promptYesNo(reader, out, "After client-side testing, did the isolated verification restore succeed without affecting production clients?", false)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		fmt.Fprintln(out, "[WARN] Live restore verification was not confirmed. The archive remains at restorable_verified.")
+		return nil
+	}
+	_, err = restore.Run(restore.Options{
+		TargetOS:          sourceOS,
+		Archive:           backupRes.ArchivePath,
+		TargetDataDir:     res.TargetDataDir,
+		ValidateOnly:      true,
+		LiveVerify:        true,
+		UserConfirmedLive: true,
+		TripleConfirmed:   true,
+		Out:               out,
 	})
 	return err
 }

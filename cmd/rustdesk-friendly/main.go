@@ -134,6 +134,8 @@ func runApplyBackup(args []string) error {
 	sourceDataDir := fs.String("source-data-dir", "", "source rustdesk data dir")
 	output := fs.String("output", "", "archive output path")
 	force := fs.Bool("force", false, "overwrite existing output archive")
+	liveVerify := fs.Bool("live-verify", false, "immediately run isolated live-restore verification on the local host")
+	tripleConfirmed := fs.Bool("triple-confirmed", false, "acknowledge high-risk verification changes on the local host")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -149,6 +151,20 @@ func runApplyBackup(args []string) error {
 		return err
 	}
 	fmt.Printf("[OK] Backup ready: %s\n", res.ArchivePath)
+	if *liveVerify {
+		restoreRes, err := restore.Run(restore.Options{
+			TargetOS:        *source,
+			Archive:         res.ArchivePath,
+			Force:           true,
+			LiveVerify:      true,
+			TripleConfirmed: *tripleConfirmed,
+			Out:             os.Stdout,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("[OK] Isolated live verification prepared in: %s\n", restoreRes.IsolatedValidationDataDir)
+	}
 	return nil
 }
 
@@ -228,6 +244,8 @@ Apply backup flags:
   --source-data-dir <dir>
   --output <archive-path>
   --force
+  --live-verify
+  --triple-confirmed
 
 Apply import flags:
   --target windows|linux
