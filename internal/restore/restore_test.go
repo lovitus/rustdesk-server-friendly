@@ -84,6 +84,15 @@ func TestRunLiveVerifyWritesStateAndConfirmation(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(res.IsolatedValidationDataDir, ".rustdesk-friendly-verification-report.json")); err != nil {
 		t.Fatal(err)
 	}
+	for _, name := range []string{
+		"rustdesk-friendly-client-validation-windows.md",
+		"rustdesk-friendly-client-validation-linux.md",
+		"rustdesk-friendly-client-validation-macos.md",
+	} {
+		if _, err := os.Stat(filepath.Join(res.IsolatedValidationDataDir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	md, err := os.ReadFile(filepath.Join(res.IsolatedValidationDataDir, "rustdesk-friendly-verification-report.md"))
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +100,7 @@ func TestRunLiveVerifyWritesStateAndConfirmation(t *testing.T) {
 	if !strings.Contains(string(md), "Manual Validation Record") {
 		t.Fatal("expected manual validation record in verification report")
 	}
-	if _, err := Run(Options{TargetOS: "linux", Archive: archive, TargetDataDir: target, ValidateOnly: true, UserConfirmedLive: true, TripleConfirmed: true}); err != nil {
+	if err := ConfirmLiveRestoreVerified(archive, res.IsolatedValidationDataDir); err != nil {
 		t.Fatal(err)
 	}
 }

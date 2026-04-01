@@ -99,6 +99,7 @@ Useful flags:
 - `--live-verify`
 - `--user-confirmed-live`
 - `--triple-confirmed`
+- `apply confirm-live-verify --archive ... --verification-dir ...`
 
 Interactive backup now also offers:
 
@@ -118,6 +119,7 @@ Restore behavior:
 - can mark the archive as `live_restore_verified` after operator confirmation
 - writes verification reports into the target or isolated verification directory
 - includes Windows/Linux/macOS client validation templates and manual validation record fields in the verification report
+- exports per-client template files such as `rustdesk-friendly-client-validation-windows.md`
 
 ### Diagnose / Repair
 

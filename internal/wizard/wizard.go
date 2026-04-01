@@ -127,17 +127,7 @@ func runBackupFlow(reader *bufio.Reader, out io.Writer) error {
 		fmt.Fprintln(out, "[WARN] Live restore verification was not confirmed. The archive remains at restorable_verified.")
 		return nil
 	}
-	_, err = restore.Run(restore.Options{
-		TargetOS:          sourceOS,
-		Archive:           backupRes.ArchivePath,
-		TargetDataDir:     res.TargetDataDir,
-		ValidateOnly:      true,
-		LiveVerify:        true,
-		UserConfirmedLive: true,
-		TripleConfirmed:   true,
-		Out:               out,
-	})
-	return err
+	return restore.ConfirmLiveRestoreVerified(backupRes.ArchivePath, res.IsolatedValidationDataDir)
 }
 
 func runRestoreFlow(reader *bufio.Reader, out io.Writer) error {
@@ -175,17 +165,7 @@ func runRestoreFlow(reader *bufio.Reader, out io.Writer) error {
 			return err
 		}
 		if ok {
-			_, err = restore.Run(restore.Options{
-				TargetOS:          targetOS,
-				Archive:           archivePath,
-				TargetDataDir:     res.TargetDataDir,
-				ValidateOnly:      true,
-				LiveVerify:        true,
-				UserConfirmedLive: true,
-				TripleConfirmed:   true,
-				Out:               out,
-			})
-			return err
+			return restore.ConfirmLiveRestoreVerified(archivePath, res.IsolatedValidationDataDir)
 		}
 	}
 	return nil

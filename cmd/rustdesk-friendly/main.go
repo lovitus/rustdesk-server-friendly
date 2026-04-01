@@ -111,13 +111,15 @@ func runGuide(args []string) error {
 
 func runApply(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("apply requires a subcommand: backup|import|new-service|diagnose")
+		return fmt.Errorf("apply requires a subcommand: backup|import|confirm-live-verify|new-service|diagnose")
 	}
 	switch strings.ToLower(args[0]) {
 	case "backup":
 		return runApplyBackup(args[1:])
 	case "import":
 		return runApplyImport(args[1:])
+	case "confirm-live-verify":
+		return runConfirmLiveVerify(args[1:])
 	case "new-service":
 		return runNewService(args[1:])
 	case "diagnose":
@@ -218,6 +220,23 @@ func runNewService(args []string) error {
 	return err
 }
 
+func runConfirmLiveVerify(args []string) error {
+	fs := flag.NewFlagSet("confirm-live-verify", flag.ContinueOnError)
+	archive := fs.String("archive", "", "backup archive path (.zip/.tgz/.tar.gz)")
+	verificationDir := fs.String("verification-dir", "", "isolated verification directory containing live verify state")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*archive) == "" {
+		return fmt.Errorf("--archive is required")
+	}
+	if err := restore.ConfirmLiveRestoreVerified(*archive, *verificationDir); err != nil {
+		return err
+	}
+	fmt.Printf("[OK] Archive marked as live_restore_verified: %s\n", *archive)
+	return nil
+}
+
 func printHelp() {
 	fmt.Print(`rustdesk-friendly (Go rewrite)
 
@@ -229,6 +248,7 @@ Usage:
   rustdesk-friendly guide [flags]
   rustdesk-friendly apply backup [flags]
   rustdesk-friendly apply import [flags]
+  rustdesk-friendly apply confirm-live-verify --archive <backup-archive> [--verification-dir DIR]
   rustdesk-friendly version
 
 Guide flags:

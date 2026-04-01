@@ -53,6 +53,7 @@ type Result struct {
 	VerificationInstructions   []string
 	VerificationReportPath     string
 	ClientValidationTemplates  map[string][]string
+	ClientTemplatePaths        map[string]string
 }
 
 func Run(opts Options) (Result, error) {
@@ -210,11 +211,12 @@ func Run(opts Options) (Result, error) {
 		}
 	}
 
-	reportPath, err := writeVerificationReport(result, archivePath)
+	reportPath, templatePaths, err := writeVerificationReport(result, archivePath)
 	if err != nil {
 		return result, err
 	}
 	result.VerificationReportPath = reportPath
+	result.ClientTemplatePaths = templatePaths
 
 	sort.Strings(result.RestoredFiles)
 	logResult(opts.Out, result)
@@ -388,6 +390,20 @@ func markLiveRestoreVerified(archivePath string) error {
 	return backup.RewriteArchiveManifest(archivePath, entries, manifest)
 }
 
+func ConfirmLiveRestoreVerified(archivePath, verificationDir string) error {
+	archivePath = common.Abs(strings.TrimSpace(archivePath))
+	if archivePath == "" {
+		return errors.New("archive path is required")
+	}
+	if err := markLiveRestoreVerified(archivePath); err != nil {
+		return err
+	}
+	if strings.TrimSpace(verificationDir) != "" {
+		return writeLiveVerifyState(verificationDir, archivePath, bundle.VerificationLiveRestore, true)
+	}
+	return nil
+}
+
 func writeLiveVerifyState(dir, archivePath, level string, confirmed bool) error {
 	if strings.TrimSpace(dir) == "" {
 		return nil
@@ -408,7 +424,7 @@ func writeLiveVerifyState(dir, archivePath, level string, confirmed bool) error 
 	return os.WriteFile(filepath.Join(dir, ".rustdesk-friendly-live-verify.json"), data, 0o644)
 }
 
-func writeVerificationReport(result Result, archivePath string) (string, error) {
+func writeVerificationReport(result Result, archivePath string) (string, map[string]string, error) {
 	baseDir := result.TargetDataDir
 	if result.IsolatedValidationDataDir != "" {
 		baseDir = result.IsolatedValidationDataDir
@@ -417,7 +433,11 @@ func writeVerificationReport(result Result, archivePath string) (string, error) 
 		baseDir = filepath.Dir(archivePath)
 	}
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
-		return "", err
+		return "", nil, err
+	}
+	templatePaths, err := writeClientTemplateFiles(baseDir, result.ClientValidationTemplates)
+	if err != nil {
+		return "", nil, err
 	}
 	payload := map[string]any{
 		"archive":                      archivePath,
@@ -428,6 +448,7 @@ func writeVerificationReport(result Result, archivePath string) (string, error) 
 		"isolated_validation_services": result.IsolatedValidationServices,
 		"verification_instructions":    result.VerificationInstructions,
 		"client_validation_templates":  result.ClientValidationTemplates,
+		"client_template_paths":        templatePaths,
 		"manual_validation_fields": map[string]string{
 			"operator_name":              "",
 			"validation_started_at":      "",
@@ -452,17 +473,17 @@ func writeVerificationReport(result Result, archivePath string) (string, error) 
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	jsonPath := filepath.Join(baseDir, ".rustdesk-friendly-verification-report.json")
 	if err := os.WriteFile(jsonPath, data, 0o644); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	md := buildVerificationMarkdown(result, archivePath)
 	if err := os.WriteFile(filepath.Join(baseDir, "rustdesk-friendly-verification-report.md"), []byte(md), 0o644); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return jsonPath, nil
+	return jsonPath, templatePaths, nil
 }
 
 func buildVerificationMarkdown(result Result, archivePath string) string {
@@ -507,6 +528,9 @@ func buildVerificationMarkdown(result Result, archivePath string) string {
 			lines = append(lines, "", "### "+strings.Title(clientOS)+" Client")
 			for _, step := range steps {
 				lines = append(lines, "- "+step)
+			}
+			if path := result.ClientTemplatePaths[clientOS]; strings.TrimSpace(path) != "" {
+				lines = append(lines, "- Template File: `"+path+"`")
 			}
 		}
 	}
@@ -585,6 +609,29 @@ func clientValidationTemplates(serviceNames []string) map[string][]string {
 	}
 }
 
+func writeClientTemplateFiles(baseDir string, templates map[string][]string) (map[string]string, error) {
+	paths := map[string]string{}
+	for clientOS, steps := range templates {
+		if len(steps) == 0 {
+			continue
+		}
+		filename := fmt.Sprintf("rustdesk-friendly-client-validation-%s.md", clientOS)
+		path := filepath.Join(baseDir, filename)
+		lines := []string{
+			fmt.Sprintf("# %s Client Validation Template", strings.Title(clientOS)),
+			"",
+		}
+		for _, step := range steps {
+			lines = append(lines, "- "+step)
+		}
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+			return nil, err
+		}
+		paths[clientOS] = path
+	}
+	return paths, nil
+}
+
 func hasExistingData(dir string) bool {
 	for _, name := range []string{"id_ed25519", "id_ed25519.pub", "db_v2.sqlite3", "db.sqlite3"} {
 		if st, err := os.Stat(filepath.Join(dir, name)); err == nil && !st.IsDir() {
@@ -646,6 +693,11 @@ func logResult(out io.Writer, result Result) {
 	}
 	if strings.TrimSpace(result.VerificationReportPath) != "" {
 		fmt.Fprintf(out, "[OK] Verification report: %s\n", result.VerificationReportPath)
+	}
+	for _, clientOS := range []string{"windows", "linux", "macos"} {
+		if path := result.ClientTemplatePaths[clientOS]; strings.TrimSpace(path) != "" {
+			fmt.Fprintf(out, "[OK] %s client template: %s\n", clientOS, path)
+		}
 	}
 	for _, check := range result.Checks {
 		fmt.Fprintf(out, "[CHECK] %s\n", check)
