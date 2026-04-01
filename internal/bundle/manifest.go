@@ -54,14 +54,20 @@ func (m *Manifest) AddFile(path, kind string) error {
 	if err != nil {
 		return err
 	}
-	hash, err := common.FileSHA256(path)
-	if err != nil {
-		return err
+	hash := ""
+	size := st.Size()
+	if st.IsDir() {
+		size = 0
+	} else {
+		hash, err = common.FileSHA256(path)
+		if err != nil {
+			return err
+		}
 	}
 	entry := FileEntry{
 		Path:   filepath.ToSlash(path),
 		SHA256: hash,
-		Size:   st.Size(),
+		Size:   size,
 		Kind:   kind,
 	}
 	m.PackageContents = append(m.PackageContents, entry)
