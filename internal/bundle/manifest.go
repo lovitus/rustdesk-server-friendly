@@ -20,10 +20,11 @@ const (
 )
 
 type FileEntry struct {
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256,omitempty"`
-	Size   int64  `json:"size,omitempty"`
-	Kind   string `json:"kind,omitempty"`
+	Path       string `json:"path"`
+	SourcePath string `json:"source_path,omitempty"`
+	SHA256     string `json:"sha256,omitempty"`
+	Size       int64  `json:"size,omitempty"`
+	Kind       string `json:"kind,omitempty"`
 }
 
 type Manifest struct {
@@ -42,7 +43,7 @@ type Manifest struct {
 
 func NewManifest(rt runtimeinfo.Runtime) Manifest {
 	return Manifest{
-		Version:           "2.5",
+		Version:           "2.6",
 		CreatedAt:         time.Now().UTC().Format(time.RFC3339),
 		SourceRuntime:     rt,
 		VerificationLevel: VerificationArchiveValid,
@@ -50,7 +51,19 @@ func NewManifest(rt runtimeinfo.Runtime) Manifest {
 }
 
 func (m *Manifest) AddFile(path, kind string) error {
-	st, err := os.Stat(path)
+	return m.AddArchiveFile(path, filepath.ToSlash(path), kind)
+}
+
+func (m *Manifest) AddArchiveFile(sourcePath, archivePath, kind string) error {
+	sourcePath = strings.TrimSpace(sourcePath)
+	archivePath = filepath.ToSlash(strings.TrimSpace(archivePath))
+	if sourcePath == "" {
+		return fmt.Errorf("source path missing")
+	}
+	if archivePath == "" {
+		return fmt.Errorf("archive path missing")
+	}
+	st, err := os.Stat(sourcePath)
 	if err != nil {
 		return err
 	}
@@ -59,19 +72,30 @@ func (m *Manifest) AddFile(path, kind string) error {
 	if st.IsDir() {
 		size = 0
 	} else {
-		hash, err = common.FileSHA256(path)
+		hash, err = common.FileSHA256(sourcePath)
 		if err != nil {
 			return err
 		}
 	}
 	entry := FileEntry{
-		Path:   filepath.ToSlash(path),
-		SHA256: hash,
-		Size:   size,
-		Kind:   kind,
+		Path:       archivePath,
+		SourcePath: filepath.ToSlash(sourcePath),
+		SHA256:     hash,
+		Size:       size,
+		Kind:       kind,
 	}
 	m.PackageContents = append(m.PackageContents, entry)
 	return nil
+}
+
+func (m *Manifest) AddVirtualFile(archivePath string, data []byte, kind string) {
+	entry := FileEntry{
+		Path:   filepath.ToSlash(strings.TrimSpace(archivePath)),
+		SHA256: common.SHA256Bytes(data),
+		Size:   int64(len(data)),
+		Kind:   kind,
+	}
+	m.PackageContents = append(m.PackageContents, entry)
 }
 
 func (m Manifest) Marshal() ([]byte, error) {

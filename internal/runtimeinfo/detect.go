@@ -205,6 +205,9 @@ func serviceExistsLinux(name string) bool {
 }
 
 func detectWindowsServiceManager() string {
+	if hasCmd("nssm") && len(detectWindowsServiceDefinitions()) > 0 {
+		return "nssm"
+	}
 	if hasCmd("pm2") && len(detectWindowsPM2Candidates()) > 0 {
 		return "pm2"
 	}

@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/lovitus/rustdesk-server-friendly/internal/acceptance"
+	"github.com/lovitus/rustdesk-server-friendly/internal/logpolicy"
 	"github.com/lovitus/rustdesk-server-friendly/internal/platform"
 	"github.com/lovitus/rustdesk-server-friendly/internal/runtimeinfo"
 	"github.com/lovitus/rustdesk-server-friendly/internal/service"
@@ -52,6 +54,13 @@ func Run(opts Options) (Result, error) {
 	result.InstallDir = chooseInstallDir(rt)
 	result.DataDir = chooseDataDir(rt)
 	result.LogDir = chooseLogDir(rt)
+	preflight := acceptance.Preflight(rt, []string{result.InstallDir, result.DataDir, result.LogDir}, []string{"rustdesk-hbbs", "rustdesk-hbbr"}, []int{21116, 21117})
+	result.Checks = append(result.Checks, preflight.Checks...)
+	result.Warnings = append(result.Warnings, preflight.Warnings...)
+	if len(preflight.BlockingIssues) > 0 {
+		result.BlockingIssues = append(result.BlockingIssues, preflight.BlockingIssues...)
+		return result, fmt.Errorf("%s", result.BlockingIssues[0])
+	}
 	for _, dir := range []string{result.InstallDir, result.DataDir, result.LogDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return result, err
@@ -86,6 +95,8 @@ func Run(opts Options) (Result, error) {
 			InstallDir:  result.InstallDir,
 			LogDir:      result.LogDir,
 			RelayHost:   "127.0.0.1",
+			HBBSPort:    21116,
+			HBBRPort:    21117,
 		})
 		if err != nil {
 			return result, err
@@ -94,6 +105,37 @@ func Run(opts Options) (Result, error) {
 		result.Checks = append(result.Checks, "managed service supported on target runtime")
 		result.Checks = append(result.Checks, svcResult.Checks...)
 		result.Warnings = append(result.Warnings, svcResult.Warnings...)
+		logResult, err := logpolicy.Apply(logpolicy.Config{
+			OS:             rt.OS,
+			ServiceManager: svcResult.Manager,
+			LogDir:         result.LogDir,
+			ServiceNames:   svcResult.ServiceNames,
+		})
+		if err != nil {
+			return result, err
+		}
+		result.ActionsPerformed = append(result.ActionsPerformed, "applied log retention policy")
+		result.Checks = append(result.Checks, logResult.Checks...)
+		result.Warnings = append(result.Warnings, logResult.Warnings...)
+		validateRuntime := rt
+		if svcResult.Manager != "" {
+			validateRuntime.ServiceManager = svcResult.Manager
+		}
+		accept := acceptance.Validate(acceptance.Options{
+			Runtime:      validateRuntime,
+			InstallDir:   result.InstallDir,
+			DataDir:      result.DataDir,
+			LogDir:       result.LogDir,
+			ServiceNames: svcResult.ServiceNames,
+			Ports:        []int{svcResult.HBBSPort, svcResult.HBBRPort},
+			RequireData:  false,
+		})
+		result.Checks = append(result.Checks, accept.Checks...)
+		result.Warnings = append(result.Warnings, accept.Warnings...)
+		if len(accept.BlockingIssues) > 0 {
+			result.BlockingIssues = append(result.BlockingIssues, accept.BlockingIssues...)
+			return result, fmt.Errorf("%s", result.BlockingIssues[0])
+		}
 	} else {
 		result.Warnings = append(result.Warnings, "managed service is not supported on this runtime; only local validation is available")
 	}

@@ -14,6 +14,8 @@ func TestRunImportZipToLinuxDir(t *testing.T) {
 	t.Setenv("RUSTDESK_FRIENDLY_SKIP_DOWNLOAD", "1")
 	t.Setenv("RUSTDESK_FRIENDLY_SKIP_SYSTEMCTL", "1")
 	t.Setenv("RUSTDESK_FRIENDLY_SYSTEMD_DIR", filepath.Join(tmpRoot, "systemd"))
+	t.Setenv("RUSTDESK_FRIENDLY_LOGROTATE_FILE", filepath.Join(tmpRoot, "logrotate", "rustdesk-server"))
+	t.Setenv("RUSTDESK_FRIENDLY_JOURNALD_FILE", filepath.Join(tmpRoot, "journald", "rustdesk.conf"))
 	t.Setenv("RUSTDESK_FRIENDLY_INSTALL_DIR", filepath.Join(tmpRoot, "install"))
 	tmp := t.TempDir()
 	source := filepath.Join(tmp, "source")
@@ -34,8 +36,8 @@ func TestRunImportZipToLinuxDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.RestoredFiles) != 3 {
-		t.Fatalf("expected 3 restored files, got %d", len(res.RestoredFiles))
+	if len(res.RestoredFiles) != 5 {
+		t.Fatalf("expected 5 restored files, got %d", len(res.RestoredFiles))
 	}
 	if _, err := os.Stat(filepath.Join(target, "id_ed25519")); err != nil {
 		t.Fatal(err)
@@ -57,6 +59,8 @@ func TestRunLiveVerifyWritesStateAndConfirmation(t *testing.T) {
 	t.Setenv("RUSTDESK_FRIENDLY_SKIP_DOWNLOAD", "1")
 	t.Setenv("RUSTDESK_FRIENDLY_SKIP_SYSTEMCTL", "1")
 	t.Setenv("RUSTDESK_FRIENDLY_SYSTEMD_DIR", filepath.Join(tmpRoot, "systemd"))
+	t.Setenv("RUSTDESK_FRIENDLY_LOGROTATE_FILE", filepath.Join(tmpRoot, "logrotate", "rustdesk-server"))
+	t.Setenv("RUSTDESK_FRIENDLY_JOURNALD_FILE", filepath.Join(tmpRoot, "journald", "rustdesk.conf"))
 	t.Setenv("RUSTDESK_FRIENDLY_INSTALL_DIR", filepath.Join(tmpRoot, "install"))
 	tmp := t.TempDir()
 	source := filepath.Join(tmp, "source")

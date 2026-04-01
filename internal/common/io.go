@@ -22,6 +22,11 @@ func FileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+func SHA256Bytes(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
 func CopyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {

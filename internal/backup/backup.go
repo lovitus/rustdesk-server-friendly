@@ -42,9 +42,10 @@ type Result struct {
 }
 
 type archiveEntry struct {
-	Src  string
-	Dst  string
-	Kind string
+	Src   string
+	Dst   string
+	Kind  string
+	Bytes []byte
 }
 
 type ArchiveRewriteEntry struct {
@@ -105,7 +106,11 @@ func Run(opts Options) (Result, error) {
 	manifest.RestorePlan = defaultRestorePlan(rt)
 
 	for _, entry := range entries {
-		if err := manifest.AddFile(entry.Src, entry.Kind); err != nil {
+		if len(entry.Bytes) > 0 {
+			manifest.AddVirtualFile(entry.Dst, entry.Bytes, entry.Kind)
+			continue
+		}
+		if err := manifest.AddArchiveFile(entry.Src, entry.Dst, entry.Kind); err != nil {
 			return Result{}, err
 		}
 	}
@@ -174,6 +179,9 @@ func VerifyArchive(path string) (bundle.Manifest, error) {
 	if len(files) == 0 {
 		return bundle.Manifest{}, fmt.Errorf("archive has no restorable content")
 	}
+	if err := validateArchiveEntries(tmp, files, manifest); err != nil {
+		return bundle.Manifest{}, err
+	}
 	hasPriv, hasPub := false, false
 	for _, f := range files {
 		base := filepath.Base(f)
@@ -188,6 +196,63 @@ func VerifyArchive(path string) (bundle.Manifest, error) {
 		return bundle.Manifest{}, fmt.Errorf("archive invalid: missing id_ed25519 or id_ed25519.pub")
 	}
 	return manifest, nil
+}
+
+func validateArchiveEntries(root string, files []string, manifest bundle.Manifest) error {
+	expected := map[string]bundle.FileEntry{}
+	for _, entry := range manifest.PackageContents {
+		archivePath := normalizedArchiveManifestPath(entry)
+		if archivePath == "" {
+			return fmt.Errorf("manifest entry has no usable archive path for kind %s", entry.Kind)
+		}
+		if !allowedArchivePath(archivePath) {
+			return fmt.Errorf("manifest entry uses unsupported archive path: %s", archivePath)
+		}
+		expected[archivePath] = entry
+	}
+	if len(expected) == 0 {
+		return fmt.Errorf("manifest has no package contents")
+	}
+	seen := map[string]bool{}
+	for _, file := range files {
+		rel, err := filepath.Rel(root, file)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if !allowedArchivePath(rel) {
+			return fmt.Errorf("archive contains unsupported path: %s", rel)
+		}
+		entry, ok := expected[rel]
+		if !ok {
+			return fmt.Errorf("archive contains file not declared in manifest: %s", rel)
+		}
+		if entry.Size > 0 {
+			st, err := os.Stat(file)
+			if err != nil {
+				return err
+			}
+			if st.Size() != entry.Size {
+				return fmt.Errorf("archive file size mismatch for %s", rel)
+			}
+		}
+		if strings.TrimSpace(entry.SHA256) != "" {
+			hash, err := common.FileSHA256(file)
+			if err != nil {
+				return err
+			}
+			if !strings.EqualFold(hash, entry.SHA256) {
+				return fmt.Errorf("archive file hash mismatch for %s", rel)
+			}
+		}
+		seen[rel] = true
+	}
+	for rel := range expected {
+		if !seen[rel] {
+			return fmt.Errorf("manifest entry missing from archive: %s", rel)
+		}
+	}
+	return nil
 }
 
 func ExtractArchiveForRestore(path string) (string, []string, bundle.Manifest, error) {
@@ -277,11 +342,13 @@ func extractToTemp(path string) (string, []string, bundle.Manifest, error) {
 func collectEntries(rt runtimeinfo.Runtime) ([]archiveEntry, []string, error) {
 	entries := []archiveEntry{}
 	warnings := []string{}
+	hasPrimaryContent := false
 	addFile := func(src, dst, kind string) {
 		if src == "" || !isFile(src) {
 			return
 		}
 		entries = append(entries, archiveEntry{Src: src, Dst: dst, Kind: kind})
+		hasPrimaryContent = true
 	}
 
 	for _, name := range []string{"id_ed25519", "id_ed25519.pub"} {
@@ -316,9 +383,50 @@ func collectEntries(rt runtimeinfo.Runtime) ([]archiveEntry, []string, error) {
 			Dst:  filepath.ToSlash(filepath.Join("logs", "snapshot.json")),
 			Kind: "logs",
 		})
+		hasPrimaryContent = true
 	}
+	runtimeSnapshot, err := json.MarshalIndent(map[string]any{
+		"os":                  rt.OS,
+		"arch":                rt.Arch,
+		"service_manager":     rt.ServiceManager,
+		"existing_service":    rt.ExistingService,
+		"data_dir":            rt.DataDir,
+		"install_dir":         rt.InstallDir,
+		"log_dir":             rt.LogDir,
+		"binary_paths":        rt.BinaryPaths,
+		"service_definitions": rt.ServiceDefinitions,
+		"ports":               rt.Ports,
+		"warnings":            rt.Warnings,
+	}, "", "  ")
+	if err != nil {
+		return nil, nil, err
+	}
+	entries = append(entries, archiveEntry{
+		Dst:   filepath.ToSlash(filepath.Join("runtime", "snapshot.json")),
+		Kind:  "runtime",
+		Bytes: runtimeSnapshot,
+	})
+	policySnapshot, err := json.MarshalIndent(map[string]any{
+		"log_dir":         rt.LogDir,
+		"service_manager": rt.ServiceManager,
+		"recommended": map[string]any{
+			"linux_logrotate_daily":     true,
+			"linux_logrotate_size":      "50M",
+			"linux_logrotate_retain":    14,
+			"windows_pm2_logrotate":     true,
+			"windows_nssm_rotate_bytes": 52428800,
+		},
+	}, "", "  ")
+	if err != nil {
+		return nil, nil, err
+	}
+	entries = append(entries, archiveEntry{
+		Dst:   filepath.ToSlash(filepath.Join("policy", "snapshot.json")),
+		Kind:  "policy",
+		Bytes: policySnapshot,
+	})
 
-	if len(entries) == 0 {
+	if !hasPrimaryContent {
 		return nil, warnings, nil
 	}
 	return entries, warnings, nil
@@ -348,6 +456,45 @@ func chooseBestDataDir(candidates []string) string {
 		}
 	}
 	return firstExisting
+}
+
+func normalizedArchiveManifestPath(entry bundle.FileEntry) string {
+	path := filepath.ToSlash(strings.TrimSpace(entry.Path))
+	if allowedArchivePath(path) {
+		return path
+	}
+	base := filepath.Base(path)
+	if base == "." || base == "" {
+		return ""
+	}
+	switch entry.Kind {
+	case "data":
+		return filepath.ToSlash(filepath.Join("data", base))
+	case "app":
+		return filepath.ToSlash(filepath.Join("app", base))
+	case "service":
+		return filepath.ToSlash(filepath.Join("service", sanitizeName(path)))
+	case "logs":
+		return filepath.ToSlash(filepath.Join("logs", "snapshot.json"))
+	}
+	return ""
+}
+
+func allowedArchivePath(path string) bool {
+	path = filepath.ToSlash(strings.TrimSpace(path))
+	if path == "" || strings.HasPrefix(path, "/") {
+		return false
+	}
+	clean := filepath.ToSlash(filepath.Clean(path))
+	if clean == "." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
+		return false
+	}
+	for _, prefix := range []string{"data/", "app/", "service/", "logs/", "runtime/", "policy/"} {
+		if strings.HasPrefix(clean, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func defaultRestorePlan(rt runtimeinfo.Runtime) []string {
@@ -443,6 +590,12 @@ func writeZip(out string, entries []archiveEntry, manifest []byte) error {
 			}
 			continue
 		}
+		if len(entry.Bytes) > 0 {
+			if err := addZipBytes(zw, entry.Dst, entry.Bytes); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := addZipFile(zw, entry.Src, entry.Dst); err != nil {
 			return err
 		}
@@ -468,6 +621,12 @@ func writeTarGz(out string, entries []archiveEntry, manifest []byte) error {
 	for _, entry := range entries {
 		if entry.Kind == "logs" && isDir(entry.Src) {
 			if err := writeLogSnapshotTar(tw, entry); err != nil {
+				return err
+			}
+			continue
+		}
+		if len(entry.Bytes) > 0 {
+			if err := addTarBytes(tw, entry.Dst, entry.Bytes); err != nil {
 				return err
 			}
 			continue
@@ -525,6 +684,15 @@ func addZipFile(zw *zip.Writer, src, name string) error {
 	}
 	defer f.Close()
 	_, err = io.Copy(w, f)
+	return err
+}
+
+func addZipBytes(zw *zip.Writer, name string, data []byte) error {
+	w, err := zw.Create(name)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(data)
 	return err
 }
 

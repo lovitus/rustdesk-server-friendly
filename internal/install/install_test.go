@@ -11,6 +11,10 @@ func TestRunCreatesRuntimePlanAndServiceArtifacts(t *testing.T) {
 	t.Setenv("RUSTDESK_FRIENDLY_SKIP_SYSTEMCTL", "1")
 	unitDir := filepath.Join(t.TempDir(), "systemd")
 	t.Setenv("RUSTDESK_FRIENDLY_SYSTEMD_DIR", unitDir)
+	logrotateFile := filepath.Join(t.TempDir(), "logrotate", "rustdesk-server")
+	journaldFile := filepath.Join(t.TempDir(), "journald", "rustdesk.conf")
+	t.Setenv("RUSTDESK_FRIENDLY_LOGROTATE_FILE", logrotateFile)
+	t.Setenv("RUSTDESK_FRIENDLY_JOURNALD_FILE", journaldFile)
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	t.Setenv("RUSTDESK_FRIENDLY_INSTALL_DIR", filepath.Join(tmp, "install"))
@@ -25,6 +29,12 @@ func TestRunCreatesRuntimePlanAndServiceArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(unitDir, "rustdesk-hbbs.service")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(logrotateFile); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(journaldFile); err != nil {
 		t.Fatal(err)
 	}
 }

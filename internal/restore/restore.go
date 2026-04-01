@@ -13,9 +13,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lovitus/rustdesk-server-friendly/internal/acceptance"
 	"github.com/lovitus/rustdesk-server-friendly/internal/backup"
 	"github.com/lovitus/rustdesk-server-friendly/internal/bundle"
 	"github.com/lovitus/rustdesk-server-friendly/internal/common"
+	"github.com/lovitus/rustdesk-server-friendly/internal/logpolicy"
 	"github.com/lovitus/rustdesk-server-friendly/internal/platform"
 	"github.com/lovitus/rustdesk-server-friendly/internal/runtimeinfo"
 	"github.com/lovitus/rustdesk-server-friendly/internal/service"
@@ -84,9 +86,13 @@ func Run(opts Options) (Result, error) {
 		VerificationLevel: manifest.VerificationLevel,
 	}
 	result.Checks = append(result.Checks, "archive manifest validated")
+	hbbsPort, hbbrPort := targetPorts(opts.LiveVerify)
 
 	if len(runtimeinfo.PortConflicts([]int{21115, 21116, 21117, 21118, 21119})) > 0 && !opts.LiveVerify {
 		result.Warnings = append(result.Warnings, "target has active listeners on standard RustDesk ports")
+	}
+	if opts.LiveVerify && len(runtimeinfo.PortConflicts([]int{hbbsPort - 1, hbbsPort, hbbrPort, hbbsPort + 2, hbbrPort + 2})) > 0 {
+		result.Warnings = append(result.Warnings, "target has active listeners on isolated verification ports")
 	}
 
 	targetDataDir := strings.TrimSpace(opts.TargetDataDir)
@@ -98,6 +104,17 @@ func Run(opts Options) (Result, error) {
 	}
 	targetDataDir = common.Abs(targetDataDir)
 	result.TargetDataDir = targetDataDir
+	serviceNames := []string{"rustdesk-hbbs", "rustdesk-hbbr"}
+	if opts.LiveVerify {
+		serviceNames = []string{"rustdesk-hbbs-verify", "rustdesk-hbbr-verify"}
+	}
+	preflight := acceptance.Preflight(rt, []string{targetDataDir, defaultInstallDir(rt.OS), filepath.Join(filepath.Dir(targetDataDir), "logs")}, serviceNames, []int{hbbsPort, hbbrPort})
+	result.Checks = append(result.Checks, preflight.Checks...)
+	result.Warnings = append(result.Warnings, preflight.Warnings...)
+	if len(preflight.BlockingIssues) > 0 {
+		result.BlockingIssues = append(result.BlockingIssues, preflight.BlockingIssues...)
+		return result, errors.New(result.BlockingIssues[0])
+	}
 
 	if err := os.MkdirAll(targetDataDir, 0o755); err != nil {
 		return result, fmt.Errorf("cannot create target data dir: %w", err)
@@ -170,15 +187,53 @@ func Run(opts Options) (Result, error) {
 	result.Checks = append(result.Checks, "target binaries are available or a download plan was prepared")
 
 	if rt.ManagedService && rt.OS != "darwin" {
-		svcNames, err := configureManagedServices(rt, restoreBase, opts.LiveVerify, opts.Out)
+		svcNames, svcManager, logDir, servicePorts, checks, warnings, err := configureManagedServices(rt, restoreBase, opts.LiveVerify, opts.Out)
 		if err != nil {
 			if preBackupDir != "" {
 				_ = rollback(targetDataDir, preBackupDir, conflicts, opts.Out)
 			}
 			return result, err
 		}
+		result.Checks = append(result.Checks, checks...)
+		result.Warnings = append(result.Warnings, warnings...)
 		if opts.LiveVerify {
 			result.IsolatedValidationServices = svcNames
+		}
+		logResult, err := logpolicy.Apply(logpolicy.Config{
+			OS:             rt.OS,
+			ServiceManager: svcManager,
+			LogDir:         logDir,
+			ServiceNames:   svcNames,
+		})
+		if err != nil {
+			if preBackupDir != "" {
+				_ = rollback(targetDataDir, preBackupDir, conflicts, opts.Out)
+			}
+			return result, err
+		}
+		result.Checks = append(result.Checks, logResult.Checks...)
+		result.Warnings = append(result.Warnings, logResult.Warnings...)
+		validateRuntime := rt
+		if svcManager != "" {
+			validateRuntime.ServiceManager = svcManager
+		}
+		accept := acceptance.Validate(acceptance.Options{
+			Runtime:      validateRuntime,
+			InstallDir:   effectiveInstallDir(rt),
+			DataDir:      restoreBase,
+			LogDir:       logDir,
+			ServiceNames: svcNames,
+			Ports:        servicePorts,
+			RequireData:  true,
+		})
+		result.Checks = append(result.Checks, accept.Checks...)
+		result.Warnings = append(result.Warnings, accept.Warnings...)
+		if len(accept.BlockingIssues) > 0 {
+			result.BlockingIssues = append(result.BlockingIssues, accept.BlockingIssues...)
+			if preBackupDir != "" {
+				_ = rollback(targetDataDir, preBackupDir, conflicts, opts.Out)
+			}
+			return result, errors.New(result.BlockingIssues[0])
 		}
 	}
 
@@ -307,18 +362,16 @@ func ensureTargetBinaries(rt runtimeinfo.Runtime, manifest bundle.Manifest, out 
 	return nil
 }
 
-func configureManagedServices(rt runtimeinfo.Runtime, dataDir string, isolated bool, out io.Writer) ([]string, error) {
+func configureManagedServices(rt runtimeinfo.Runtime, dataDir string, isolated bool, out io.Writer) ([]string, string, string, []int, []string, []string, error) {
 	if !rt.ManagedService {
-		return nil, nil
+		return nil, rt.ServiceManager, "", nil, nil, nil, nil
 	}
-	installDir := defaultInstallDir(rt.OS)
-	if rt.InstallDir != "" {
-		installDir = rt.InstallDir
-	}
+	installDir := effectiveInstallDir(rt)
 	logDir := filepath.Join(filepath.Dir(dataDir), "logs")
 	if rt.LogDir != "" && !isolated {
 		logDir = rt.LogDir
 	}
+	hbbsPort, hbbrPort := targetPorts(isolated)
 	res, err := service.Apply(service.Config{
 		OS:          rt.OS,
 		ServiceName: "rustdesk",
@@ -326,21 +379,14 @@ func configureManagedServices(rt runtimeinfo.Runtime, dataDir string, isolated b
 		InstallDir:  installDir,
 		LogDir:      logDir,
 		RelayHost:   "127.0.0.1",
+		HBBSPort:    hbbsPort,
+		HBBRPort:    hbbrPort,
 		VerifyMode:  isolated,
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", logDir, nil, nil, nil, err
 	}
-	for _, unit := range res.UnitPaths {
-		logf(out, "[CHECK] service artifact: %s", unit)
-	}
-	for _, check := range res.Checks {
-		logf(out, "[CHECK] %s", check)
-	}
-	for _, warning := range res.Warnings {
-		logf(out, "[WARN] %s", warning)
-	}
-	return res.ServiceNames, nil
+	return res.ServiceNames, res.Manager, logDir, []int{res.HBBSPort, res.HBBRPort}, res.Checks, res.Warnings, nil
 }
 
 func chooseBinary(rt runtimeinfo.Runtime, name string) string {
@@ -348,9 +394,23 @@ func chooseBinary(rt runtimeinfo.Runtime, name string) string {
 		return path
 	}
 	if rt.OS == "windows" {
-		return filepath.Join(defaultInstallDir(rt.OS), name+".exe")
+		return filepath.Join(effectiveInstallDir(rt), name+".exe")
 	}
-	return filepath.Join(defaultInstallDir(rt.OS), name)
+	return filepath.Join(effectiveInstallDir(rt), name)
+}
+
+func effectiveInstallDir(rt runtimeinfo.Runtime) string {
+	if rt.InstallDir != "" {
+		return rt.InstallDir
+	}
+	return defaultInstallDir(rt.OS)
+}
+
+func targetPorts(isolated bool) (int, int) {
+	if isolated {
+		return 22116, 22117
+	}
+	return 21116, 21117
 }
 
 func healthCheck(dataDir string, isolated bool) error {
@@ -558,10 +618,12 @@ func verificationInstructions(rt runtimeinfo.Runtime, archivePath, dataDir strin
 		fmt.Sprintf("verification archive: %s", archivePath),
 		fmt.Sprintf("isolated data dir: %s", dataDir),
 	}
+	hbbsPort, hbbrPort := targetPorts(true)
 	if len(serviceNames) > 0 {
 		lines = append(lines, "isolated services: "+strings.Join(serviceNames, ", "))
 	}
 	lines = append(lines,
+		fmt.Sprintf("isolated ports: hbbs=%d, hbbr=%d, nat-test=%d, hbbs-ws=%d, hbbr-ws=%d", hbbsPort, hbbrPort, hbbsPort-1, hbbsPort+2, hbbrPort+2),
 		"pick one non-production test client and note its current ID server / relay configuration before changing anything",
 		"temporarily point that test client at the isolated verification server configuration only",
 		"confirm the original production server continues serving existing clients without impact while the test client is redirected",
@@ -591,6 +653,7 @@ func clientValidationTemplates(serviceNames []string) map[string][]string {
 	base := []string{
 		"Use one non-production test client only.",
 		"Record the current ID server and relay server values before changing anything.",
+		"Use the isolated validation ports printed by the tool when updating client network settings.",
 		fmt.Sprintf("Temporarily point the client to %s.", targetHint),
 		"Reconnect the client and verify it registers against the isolated instance.",
 		"Run one controlled session and verify it completes successfully.",

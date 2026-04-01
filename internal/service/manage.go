@@ -17,12 +17,17 @@ type Config struct {
 	InstallDir  string
 	LogDir      string
 	RelayHost   string
+	HBBSPort    int
+	HBBRPort    int
 	VerifyMode  bool
 }
 
 type Result struct {
 	UnitPaths    []string
 	ServiceNames []string
+	Manager      string
+	HBBSPort     int
+	HBBRPort     int
 	Checks       []string
 	Warnings     []string
 }
@@ -51,6 +56,7 @@ func applyLinux(cfg Config) (Result, error) {
 	if portHost == "" {
 		portHost = "127.0.0.1"
 	}
+	hbbsPort, hbbrPort := normalizePorts(cfg)
 	if cfg.VerifyMode {
 		suffix = "-verify"
 	}
@@ -63,7 +69,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=%s
-ExecStart=%s -r %s:21117
+ExecStart=%s -p %d -r %s:%d
 Restart=always
 RestartSec=5
 LimitNOFILE=1048576
@@ -72,7 +78,7 @@ StandardError=append:%s/hbbs%s.error.log
 
 [Install]
 WantedBy=multi-user.target
-`, suffix, cfg.DataDir, filepath.Join(cfg.InstallDir, "hbbs"), portHost, cfg.LogDir, suffix, cfg.LogDir, suffix)
+`, suffix, cfg.DataDir, filepath.Join(cfg.InstallDir, "hbbs"), hbbsPort, portHost, hbbrPort, cfg.LogDir, suffix, cfg.LogDir, suffix)
 	hbbrContent := fmt.Sprintf(`[Unit]
 Description=RustDesk HBBR%s
 After=network.target
@@ -80,7 +86,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=%s
-ExecStart=%s
+ExecStart=%s -p %d
 Restart=always
 RestartSec=5
 LimitNOFILE=1048576
@@ -89,7 +95,7 @@ StandardError=append:%s/hbbr%s.error.log
 
 [Install]
 WantedBy=multi-user.target
-`, suffix, cfg.DataDir, filepath.Join(cfg.InstallDir, "hbbr"), cfg.LogDir, suffix, cfg.LogDir, suffix)
+`, suffix, cfg.DataDir, filepath.Join(cfg.InstallDir, "hbbr"), hbbrPort, cfg.LogDir, suffix, cfg.LogDir, suffix)
 	if err := os.WriteFile(hbbsUnit, []byte(hbbsContent), 0o644); err != nil {
 		return Result{}, err
 	}
@@ -99,6 +105,9 @@ WantedBy=multi-user.target
 	res := Result{
 		UnitPaths:    []string{hbbsUnit, hbbrUnit},
 		ServiceNames: []string{cfg.ServiceName + "-hbbs" + suffix, cfg.ServiceName + "-hbbr" + suffix},
+		Manager:      "systemd",
+		HBBSPort:     hbbsPort,
+		HBBRPort:     hbbrPort,
 	}
 	if os.Getenv("RUSTDESK_FRIENDLY_SKIP_SYSTEMCTL") == "1" || runtime.GOOS != "linux" {
 		res.Warnings = append(res.Warnings, "systemctl execution skipped")
@@ -130,6 +139,7 @@ func applyWindows(cfg Config) (Result, error) {
 	if cfg.VerifyMode {
 		suffix = "-verify"
 	}
+	hbbsPort, hbbrPort := normalizePorts(cfg)
 	servicePayload := map[string]string{
 		"service_name_hbbs": cfg.ServiceName + "-hbbs" + suffix,
 		"service_name_hbbr": cfg.ServiceName + "-hbbr" + suffix,
@@ -137,6 +147,9 @@ func applyWindows(cfg Config) (Result, error) {
 		"hbbr":              filepath.Join(cfg.InstallDir, "hbbr.exe"),
 		"data_dir":          cfg.DataDir,
 		"log_dir":           cfg.LogDir,
+		"hbbs_port":         fmt.Sprintf("%d", hbbsPort),
+		"hbbr_port":         fmt.Sprintf("%d", hbbrPort),
+		"relay_host":        cfg.RelayHost,
 	}
 	data, err := json.MarshalIndent(servicePayload, "", "  ")
 	if err != nil {
@@ -148,12 +161,15 @@ func applyWindows(cfg Config) (Result, error) {
 	res := Result{
 		UnitPaths:    []string{planPath},
 		ServiceNames: []string{servicePayload["service_name_hbbs"], servicePayload["service_name_hbbr"]},
+		HBBSPort:     hbbsPort,
+		HBBRPort:     hbbrPort,
 	}
 	if runtime.GOOS != "windows" || os.Getenv("RUSTDESK_FRIENDLY_SKIP_SC") == "1" {
 		res.Warnings = append(res.Warnings, "windows service execution skipped")
 		return res, nil
 	}
 	manager := detectWindowsManager()
+	res.Manager = manager
 	res.Checks = append(res.Checks, "windows service manager "+manager)
 	switch manager {
 	case "nssm":
@@ -166,11 +182,11 @@ func applyWindows(cfg Config) (Result, error) {
 }
 
 func applyWindowsSC(servicePayload map[string]string, res Result) (Result, error) {
-	for name, bin := range map[string]string{
-		servicePayload["service_name_hbbs"]: servicePayload["hbbs"],
-		servicePayload["service_name_hbbr"]: servicePayload["hbbr"],
+	for name, binPath := range map[string]string{
+		servicePayload["service_name_hbbs"]: fmt.Sprintf(`"%s" -p %s -r %s:%s`, servicePayload["hbbs"], servicePayload["hbbs_port"], emptyRelayHost(servicePayload["relay_host"]), servicePayload["hbbr_port"]),
+		servicePayload["service_name_hbbr"]: fmt.Sprintf(`"%s" -p %s`, servicePayload["hbbr"], servicePayload["hbbr_port"]),
 	} {
-		create := exec.Command("sc", "create", name, "binPath=", bin, "start=", "auto")
+		create := exec.Command("sc", "create", name, "binPath=", binPath, "start=", "auto")
 		if out, err := create.CombinedOutput(); err != nil && !strings.Contains(strings.ToLower(string(out)), "already exists") {
 			return res, fmt.Errorf("sc create %s failed: %s", name, strings.TrimSpace(string(out)))
 		}
@@ -192,8 +208,15 @@ func applyWindowsNSSM(cfg Config, servicePayload map[string]string, res Result) 
 		if out, err := exec.Command("nssm", "install", name, bin).CombinedOutput(); err != nil && !strings.Contains(strings.ToLower(string(out)), "already exists") {
 			return res, fmt.Errorf("nssm install %s failed: %s", name, strings.TrimSpace(string(out)))
 		}
+		appArgs := ""
+		if strings.Contains(strings.ToLower(name), "hbbs") {
+			appArgs = fmt.Sprintf("-p %s -r %s:%s", servicePayload["hbbs_port"], emptyRelayHost(servicePayload["relay_host"]), servicePayload["hbbr_port"])
+		} else {
+			appArgs = fmt.Sprintf("-p %s", servicePayload["hbbr_port"])
+		}
 		for _, kv := range [][]string{
 			{"AppDirectory", cfg.DataDir},
+			{"AppParameters", appArgs},
 			{"AppStdout", filepath.Join(logDir, name+".log")},
 			{"AppStderr", filepath.Join(logDir, name+".error.log")},
 		} {
@@ -217,7 +240,9 @@ func applyWindowsPM2(cfg Config, servicePayload map[string]string, res Result) (
 		if out, err := exec.Command("pm2", "describe", name).CombinedOutput(); err != nil || !strings.Contains(strings.ToLower(string(out)), "status") {
 			args := []string{"start", bin, "--name", name}
 			if strings.Contains(strings.ToLower(name), "hbbs") {
-				args = append(args, "--", "-r", cfg.RelayHost+":21117")
+				args = append(args, "--", "-p", servicePayload["hbbs_port"], "-r", emptyRelayHost(servicePayload["relay_host"])+":"+servicePayload["hbbr_port"])
+			} else {
+				args = append(args, "--", "-p", servicePayload["hbbr_port"])
 			}
 			if out, err := exec.Command("pm2", args...).CombinedOutput(); err != nil {
 				return res, fmt.Errorf("pm2 start %s failed: %s", name, strings.TrimSpace(string(out)))
@@ -247,4 +272,23 @@ func detectWindowsManager() string {
 func hasCmd(name string) bool {
 	_, err := exec.LookPath(name)
 	return err == nil
+}
+
+func normalizePorts(cfg Config) (int, int) {
+	hbbsPort := cfg.HBBSPort
+	hbbrPort := cfg.HBBRPort
+	if hbbsPort <= 0 {
+		hbbsPort = 21116
+	}
+	if hbbrPort <= 0 {
+		hbbrPort = 21117
+	}
+	return hbbsPort, hbbrPort
+}
+
+func emptyRelayHost(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "127.0.0.1"
+	}
+	return v
 }

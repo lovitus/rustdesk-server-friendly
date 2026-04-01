@@ -260,7 +260,7 @@ Guide flags:
   --migration-target linux|windows
 
 Apply backup flags:
-  --source windows|linux
+  --source windows|linux|darwin
   --source-data-dir <dir>
   --output <archive-path>
   --force
@@ -268,7 +268,7 @@ Apply backup flags:
   --triple-confirmed
 
 Apply import flags:
-  --target windows|linux
+  --target windows|linux|darwin
   --archive <backup-archive>
   --target-data-dir <dir>
   --force
