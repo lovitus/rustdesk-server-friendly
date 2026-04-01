@@ -117,6 +117,7 @@ Restore behavior:
 - performs post-restore health checks
 - can mark the archive as `live_restore_verified` after operator confirmation
 - writes verification reports into the target or isolated verification directory
+- includes Windows/Linux/macOS client validation templates and manual validation record fields in the verification report
 
 ### Diagnose / Repair
 

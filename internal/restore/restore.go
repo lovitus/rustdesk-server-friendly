@@ -52,6 +52,7 @@ type Result struct {
 	IsolatedValidationServices []string
 	VerificationInstructions   []string
 	VerificationReportPath     string
+	ClientValidationTemplates  map[string][]string
 }
 
 func Run(opts Options) (Result, error) {
@@ -192,6 +193,7 @@ func Run(opts Options) (Result, error) {
 		result.VerificationLevel = bundle.VerificationRestorable
 		result.Warnings = append(result.Warnings, "isolated live-restore environment is running side-by-side; wait for operator confirmation before marking success")
 		result.VerificationInstructions = verificationInstructions(rt, archivePath, restoreBase, result.IsolatedValidationServices)
+		result.ClientValidationTemplates = clientValidationTemplates(result.IsolatedValidationServices)
 		if err := writeLiveVerifyState(restoreBase, archivePath, result.VerificationLevel, false); err != nil {
 			return result, err
 		}
@@ -425,13 +427,28 @@ func writeVerificationReport(result Result, archivePath string) (string, error) 
 		"isolated_validation_data_dir": result.IsolatedValidationDataDir,
 		"isolated_validation_services": result.IsolatedValidationServices,
 		"verification_instructions":    result.VerificationInstructions,
-		"checks":                       result.Checks,
-		"warnings":                     result.Warnings,
-		"blocking_issues":              result.BlockingIssues,
-		"restored_files":               result.RestoredFiles,
-		"service_manager":              result.ServiceManager,
-		"runtime":                      fmt.Sprintf("%s/%s", result.DetectedRuntime.OS, result.DetectedRuntime.Arch),
-		"generated_at":                 time.Now().UTC().Format(time.RFC3339),
+		"client_validation_templates":  result.ClientValidationTemplates,
+		"manual_validation_fields": map[string]string{
+			"operator_name":              "",
+			"validation_started_at":      "",
+			"validation_completed_at":    "",
+			"test_client_os":             "",
+			"test_client_identifier":     "",
+			"client_config_before":       "",
+			"client_config_after":        "",
+			"production_clients_healthy": "",
+			"isolated_server_healthy":    "",
+			"test_session_result":        "",
+			"rollback_needed":            "",
+			"final_notes":                "",
+		},
+		"checks":          result.Checks,
+		"warnings":        result.Warnings,
+		"blocking_issues": result.BlockingIssues,
+		"restored_files":  result.RestoredFiles,
+		"service_manager": result.ServiceManager,
+		"runtime":         fmt.Sprintf("%s/%s", result.DetectedRuntime.OS, result.DetectedRuntime.Arch),
+		"generated_at":    time.Now().UTC().Format(time.RFC3339),
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
@@ -480,6 +497,35 @@ func buildVerificationMarkdown(result Result, archivePath string) string {
 			lines = append(lines, "- "+step)
 		}
 	}
+	if len(result.ClientValidationTemplates) > 0 {
+		lines = append(lines, "", "## Client Validation Templates")
+		for _, clientOS := range []string{"windows", "linux", "macos"} {
+			steps := result.ClientValidationTemplates[clientOS]
+			if len(steps) == 0 {
+				continue
+			}
+			lines = append(lines, "", "### "+strings.Title(clientOS)+" Client")
+			for _, step := range steps {
+				lines = append(lines, "- "+step)
+			}
+		}
+	}
+	lines = append(lines,
+		"",
+		"## Manual Validation Record",
+		"- Operator Name: ",
+		"- Validation Started At: ",
+		"- Validation Completed At: ",
+		"- Test Client OS: ",
+		"- Test Client Identifier: ",
+		"- Client Config Before: ",
+		"- Client Config After: ",
+		"- Production Clients Healthy: ",
+		"- Isolated Server Healthy: ",
+		"- Test Session Result: ",
+		"- Rollback Needed: ",
+		"- Final Notes: ",
+	)
 	return strings.Join(lines, "\n") + "\n"
 }
 
@@ -511,6 +557,32 @@ func verificationInstructions(rt runtimeinfo.Runtime, archivePath, dataDir strin
 		)
 	}
 	return lines
+}
+
+func clientValidationTemplates(serviceNames []string) map[string][]string {
+	targetHint := "the isolated validation server"
+	if len(serviceNames) > 0 {
+		targetHint = fmt.Sprintf("the isolated validation server (%s)", strings.Join(serviceNames, ", "))
+	}
+	base := []string{
+		"Use one non-production test client only.",
+		"Record the current ID server and relay server values before changing anything.",
+		fmt.Sprintf("Temporarily point the client to %s.", targetHint),
+		"Reconnect the client and verify it registers against the isolated instance.",
+		"Run one controlled session and verify it completes successfully.",
+		"Restore the original client settings after the test.",
+	}
+	return map[string][]string{
+		"windows": append([]string{
+			"Open RustDesk on Windows and enter Settings -> Network.",
+		}, base...),
+		"linux": append([]string{
+			"Open RustDesk on Linux and enter Settings -> Network.",
+		}, base...),
+		"macos": append([]string{
+			"Open RustDesk on macOS and enter Settings -> Network.",
+		}, base...),
+	}
 }
 
 func hasExistingData(dir string) bool {

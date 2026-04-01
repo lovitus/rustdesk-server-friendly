@@ -3,6 +3,7 @@ package restore
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/lovitus/rustdesk-server-friendly/internal/backup"
@@ -42,6 +43,13 @@ func TestRunImportZipToLinuxDir(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(target, ".rustdesk-friendly-verification-report.json")); err != nil {
 		t.Fatal(err)
 	}
+	md, err := os.ReadFile(filepath.Join(target, "rustdesk-friendly-verification-report.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(md), "Verification Level") {
+		t.Fatal("expected verification summary in verification report")
+	}
 }
 
 func TestRunLiveVerifyWritesStateAndConfirmation(t *testing.T) {
@@ -75,6 +83,13 @@ func TestRunLiveVerifyWritesStateAndConfirmation(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(res.IsolatedValidationDataDir, ".rustdesk-friendly-verification-report.json")); err != nil {
 		t.Fatal(err)
+	}
+	md, err := os.ReadFile(filepath.Join(res.IsolatedValidationDataDir, "rustdesk-friendly-verification-report.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(md), "Manual Validation Record") {
+		t.Fatal("expected manual validation record in verification report")
 	}
 	if _, err := Run(Options{TargetOS: "linux", Archive: archive, TargetDataDir: target, ValidateOnly: true, UserConfirmedLive: true, TripleConfirmed: true}); err != nil {
 		t.Fatal(err)
