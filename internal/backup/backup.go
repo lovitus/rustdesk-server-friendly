@@ -268,8 +268,10 @@ func extractToTemp(path string) (string, []string, bundle.Manifest, error) {
 	files := []string{}
 	var manifest bundle.Manifest
 	save := func(name string, r io.Reader) error {
-		base := filepath.Base(name)
-		outPath := filepath.Join(tmp, filepath.FromSlash(name))
+		cleanName, outPath, err := safeArchiveExtractPath(tmp, name)
+		if err != nil {
+			return err
+		}
 		if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 			return err
 		}
@@ -277,7 +279,7 @@ func extractToTemp(path string) (string, []string, bundle.Manifest, error) {
 		if err != nil {
 			return err
 		}
-		if base == bundle.ManifestName {
+		if cleanName == bundle.ManifestName {
 			manifest, err = bundle.Parse(data)
 			return err
 		}
@@ -337,6 +339,26 @@ func extractToTemp(path string) (string, []string, bundle.Manifest, error) {
 		}
 	}
 	return tmp, files, manifest, nil
+}
+
+func safeArchiveExtractPath(root, name string) (string, string, error) {
+	clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(name)))
+	if clean == "." || clean == "" {
+		return "", "", fmt.Errorf("archive contains invalid path: %s", name)
+	}
+	if clean != bundle.ManifestName && !allowedArchivePath(clean) {
+		return "", "", fmt.Errorf("archive contains unsupported path: %s", name)
+	}
+	candidate := filepath.Join(root, filepath.FromSlash(clean))
+	rel, err := filepath.Rel(root, candidate)
+	if err != nil {
+		return "", "", err
+	}
+	rel = filepath.ToSlash(rel)
+	if rel == ".." || strings.HasPrefix(rel, "../") {
+		return "", "", fmt.Errorf("archive path escapes extraction root: %s", name)
+	}
+	return clean, candidate, nil
 }
 
 func collectEntries(rt runtimeinfo.Runtime) ([]archiveEntry, []string, error) {

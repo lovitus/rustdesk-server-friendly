@@ -160,6 +160,43 @@ func TestVerifyArchiveRejectsHashMismatch(t *testing.T) {
 	}
 }
 
+func TestVerifyArchiveRejectsPathTraversal(t *testing.T) {
+	tmp := t.TempDir()
+	out := filepath.Join(tmp, "traversal.zip")
+	f, err := os.Create(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	w, err := zw.Create("../escape.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("escape")); err != nil {
+		t.Fatal(err)
+	}
+	manifestBytes, err := json.MarshalIndent(bundle.Manifest{Version: "1"}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err = zw.Create(bundle.ManifestName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(manifestBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyArchive(out); err == nil {
+		t.Fatal("expected path traversal validation failure")
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

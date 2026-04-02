@@ -54,7 +54,13 @@ func Run(opts Options) (Result, error) {
 	result.InstallDir = chooseInstallDir(rt)
 	result.DataDir = chooseDataDir(rt)
 	result.LogDir = chooseLogDir(rt)
-	preflight := acceptance.Preflight(rt, []string{result.InstallDir, result.DataDir, result.LogDir}, []string{"rustdesk-hbbs", "rustdesk-hbbr"}, []int{21116, 21117})
+	preflight := acceptance.Preflight(
+		rt,
+		[]string{result.InstallDir, result.DataDir, result.LogDir},
+		[]string{"rustdesk-hbbs", "rustdesk-hbbr"},
+		[]int{21116, 21117},
+		opts.TripleConfirmed,
+	)
 	result.Checks = append(result.Checks, preflight.Checks...)
 	result.Warnings = append(result.Warnings, preflight.Warnings...)
 	if len(preflight.BlockingIssues) > 0 {

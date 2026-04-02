@@ -18,16 +18,17 @@ type Result struct {
 }
 
 type Options struct {
-	Runtime      runtimeinfo.Runtime
-	InstallDir   string
-	DataDir      string
-	LogDir       string
-	ServiceNames []string
-	Ports        []int
-	RequireData  bool
+	Runtime               runtimeinfo.Runtime
+	InstallDir            string
+	DataDir               string
+	LogDir                string
+	ServiceNames          []string
+	Ports                 []int
+	RequireData           bool
+	AllowServiceConflicts bool
 }
 
-func Preflight(rt runtimeinfo.Runtime, dirs []string, serviceNames []string, ports []int) Result {
+func Preflight(rt runtimeinfo.Runtime, dirs []string, serviceNames []string, ports []int, allowServiceConflicts bool) Result {
 	res := Result{}
 	for _, dir := range dirs {
 		dir = strings.TrimSpace(dir)
@@ -51,13 +52,21 @@ func Preflight(rt runtimeinfo.Runtime, dirs []string, serviceNames []string, por
 	}
 	for _, name := range serviceNames {
 		if serviceNameConflict(rt.OS, name) {
-			res.BlockingIssues = append(res.BlockingIssues, "service already exists: "+name)
+			if allowServiceConflictWarning(rt.OS, allowServiceConflicts) {
+				res.Warnings = append(res.Warnings, "service already exists and will be taken over: "+name)
+			} else {
+				res.BlockingIssues = append(res.BlockingIssues, "service already exists: "+name)
+			}
 		}
 	}
 	for _, issue := range runtimeinfo.PortConflicts(ports) {
 		res.Warnings = append(res.Warnings, issue)
 	}
 	return res
+}
+
+func allowServiceConflictWarning(osName string, allowServiceConflicts bool) bool {
+	return allowServiceConflicts && strings.EqualFold(strings.TrimSpace(osName), "linux")
 }
 
 func Validate(opts Options) Result {
@@ -177,7 +186,11 @@ func serviceNameConflict(osName, name string) bool {
 		if _, err := exec.LookPath("systemctl"); err != nil {
 			return false
 		}
-		return exec.Command("systemctl", "status", name).Run() == nil
+		out, err := exec.Command("systemctl", "show", name, "--property=LoadState", "--value").Output()
+		if err != nil {
+			return false
+		}
+		return linuxServiceLoadStateExists(string(out))
 	case "windows":
 		if _, err := exec.LookPath("sc"); err != nil {
 			return false
@@ -186,6 +199,11 @@ func serviceNameConflict(osName, name string) bool {
 	default:
 		return false
 	}
+}
+
+func linuxServiceLoadStateExists(v string) bool {
+	state := strings.ToLower(strings.TrimSpace(v))
+	return state != "" && state != "not-found" && state != "error"
 }
 
 func validateServices(osName, manager string, names []string) ([]string, []string, []string) {

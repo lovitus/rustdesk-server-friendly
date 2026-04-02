@@ -186,17 +186,19 @@ func runApplyImport(args []string) error {
 	if strings.TrimSpace(*archive) == "" {
 		return fmt.Errorf("--archive is required")
 	}
+	if *userConfirmedLive {
+		return fmt.Errorf("--user-confirmed-live is no longer accepted here; use apply confirm-live-verify --archive <backup-archive> --verification-dir <dir>")
+	}
 
 	res, err := restore.Run(restore.Options{
-		TargetOS:          *target,
-		Archive:           *archive,
-		TargetDataDir:     *targetDataDir,
-		Force:             *force,
-		ValidateOnly:      *validateOnly,
-		LiveVerify:        *liveVerify,
-		UserConfirmedLive: *userConfirmedLive,
-		TripleConfirmed:   *tripleConfirmed,
-		Out:               os.Stdout,
+		TargetOS:        *target,
+		Archive:         *archive,
+		TargetDataDir:   *targetDataDir,
+		Force:           *force,
+		ValidateOnly:    *validateOnly,
+		LiveVerify:      *liveVerify,
+		TripleConfirmed: *tripleConfirmed,
+		Out:             os.Stdout,
 	})
 	if err != nil {
 		return err
@@ -248,7 +250,7 @@ Usage:
   rustdesk-friendly guide [flags]
   rustdesk-friendly apply backup [flags]
   rustdesk-friendly apply import [flags]
-  rustdesk-friendly apply confirm-live-verify --archive <backup-archive> [--verification-dir DIR]
+  rustdesk-friendly apply confirm-live-verify --archive <backup-archive> --verification-dir <dir>
   rustdesk-friendly version
 
 Guide flags:
@@ -274,7 +276,6 @@ Apply import flags:
   --force
   --validate-only
   --live-verify
-  --user-confirmed-live
   --triple-confirmed
 `)
 }

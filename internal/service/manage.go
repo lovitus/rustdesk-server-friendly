@@ -113,13 +113,7 @@ WantedBy=multi-user.target
 		res.Warnings = append(res.Warnings, "systemctl execution skipped")
 		return res, nil
 	}
-	for _, args := range [][]string{
-		{"daemon-reload"},
-		{"enable", "--now", filepath.Base(hbbsUnit)},
-		{"enable", "--now", filepath.Base(hbbrUnit)},
-		{"is-active", strings.TrimSuffix(filepath.Base(hbbsUnit), ".service")},
-		{"is-active", strings.TrimSuffix(filepath.Base(hbbrUnit), ".service")},
-	} {
+	for _, args := range linuxSystemctlCommands(hbbsUnit, hbbrUnit) {
 		cmd := exec.Command("systemctl", args...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -128,6 +122,20 @@ WantedBy=multi-user.target
 		res.Checks = append(res.Checks, fmt.Sprintf("systemctl %s", strings.Join(args, " ")))
 	}
 	return res, nil
+}
+
+func linuxSystemctlCommands(hbbsUnit, hbbrUnit string) [][]string {
+	hbbsName := strings.TrimSuffix(filepath.Base(hbbsUnit), ".service")
+	hbbrName := strings.TrimSuffix(filepath.Base(hbbrUnit), ".service")
+	return [][]string{
+		{"daemon-reload"},
+		{"enable", hbbsName},
+		{"enable", hbbrName},
+		{"restart", hbbsName},
+		{"restart", hbbrName},
+		{"is-active", hbbsName},
+		{"is-active", hbbrName},
+	}
 }
 
 func applyWindows(cfg Config) (Result, error) {

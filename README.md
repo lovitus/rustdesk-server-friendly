@@ -100,7 +100,6 @@ Useful flags:
 
 - `--validate-only`
 - `--live-verify`
-- `--user-confirmed-live`
 - `--triple-confirmed`
 - `apply confirm-live-verify --archive ... --verification-dir ...`
 
@@ -136,9 +135,14 @@ This prints runtime support, detected service manager, detected data directory, 
 When the runtime is supported, it also attempts concrete repairs:
 
 - downloads missing upstream binaries
-- recreates managed service definitions
+- recreates managed service definitions when doing so is non-disruptive
 - reapplies log retention policy
 - reruns acceptance validation after repair
+
+On Linux hosts that already have RustDesk units, `diagnose` stays non-disruptive:
+
+- it does not rewrite or restart existing managed services
+- it still runs read-only validation for service state, binaries, data files, and expected ports
 
 ## Advanced Mode
 

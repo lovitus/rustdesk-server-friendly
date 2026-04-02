@@ -201,7 +201,16 @@ func serviceExistsLinux(name string) bool {
 	if !hasCmd("systemctl") {
 		return false
 	}
-	return exec.Command("systemctl", "status", name).Run() == nil
+	out, err := exec.Command("systemctl", "show", name, "--property=LoadState", "--value").Output()
+	if err != nil {
+		return false
+	}
+	return linuxLoadStateExists(string(out))
+}
+
+func linuxLoadStateExists(v string) bool {
+	state := strings.ToLower(strings.TrimSpace(v))
+	return state != "" && state != "not-found" && state != "error"
 }
 
 func detectWindowsServiceManager() string {

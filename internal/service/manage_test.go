@@ -77,3 +77,17 @@ func TestApplyLinuxVerifyModeUsesIsolatedPorts(t *testing.T) {
 		t.Fatalf("expected isolated hbbs ports in unit, got %s", string(content))
 	}
 }
+
+func TestLinuxSystemctlCommandsRestartUnits(t *testing.T) {
+	cmds := linuxSystemctlCommands("/etc/systemd/system/rustdesk-hbbs.service", "/etc/systemd/system/rustdesk-hbbr.service")
+	got := strings.Join([]string{
+		strings.Join(cmds[0], " "),
+		strings.Join(cmds[1], " "),
+		strings.Join(cmds[2], " "),
+		strings.Join(cmds[3], " "),
+		strings.Join(cmds[4], " "),
+	}, " | ")
+	if !strings.Contains(got, "restart rustdesk-hbbs") || !strings.Contains(got, "restart rustdesk-hbbr") {
+		t.Fatalf("expected restart commands in plan, got %s", got)
+	}
+}

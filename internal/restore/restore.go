@@ -63,6 +63,26 @@ type restorePlanItem struct {
 	dst string
 }
 
+type verificationReport struct {
+	Archive                    string              `json:"archive"`
+	TargetDataDir              string              `json:"target_data_dir"`
+	VerificationLevel          string              `json:"verification_level"`
+	UserConfirmedLiveRestore   bool                `json:"user_confirmed_live_restore"`
+	IsolatedValidationDataDir  string              `json:"isolated_validation_data_dir"`
+	IsolatedValidationServices []string            `json:"isolated_validation_services"`
+	VerificationInstructions   []string            `json:"verification_instructions"`
+	ClientValidationTemplates  map[string][]string `json:"client_validation_templates"`
+	ClientTemplatePaths        map[string]string   `json:"client_template_paths"`
+	ManualValidationFields     map[string]string   `json:"manual_validation_fields"`
+	Checks                     []string            `json:"checks"`
+	Warnings                   []string            `json:"warnings"`
+	BlockingIssues             []string            `json:"blocking_issues"`
+	RestoredFiles              []string            `json:"restored_files"`
+	ServiceManager             string              `json:"service_manager"`
+	Runtime                    string              `json:"runtime"`
+	GeneratedAt                string              `json:"generated_at"`
+}
+
 func Run(opts Options) (Result, error) {
 	targetOS := normalizeOS(opts.TargetOS)
 	rt := runtimeinfo.Detect(targetOS)
@@ -90,6 +110,9 @@ func Run(opts Options) (Result, error) {
 		RestorePlan:       manifest.RestorePlan,
 		VerificationLevel: manifest.VerificationLevel,
 	}
+	if opts.UserConfirmedLive {
+		return result, errors.New("user-confirmed-live is not accepted in restore flow; use confirm-live-verify after isolated validation")
+	}
 	result.Checks = append(result.Checks, "archive manifest validated")
 	hbbsPort, hbbrPort := targetPorts(opts.LiveVerify)
 
@@ -109,11 +132,22 @@ func Run(opts Options) (Result, error) {
 	}
 	targetDataDir = common.Abs(targetDataDir)
 	result.TargetDataDir = targetDataDir
+	existingServiceOrData := rt.ExistingService || hasExistingData(targetDataDir)
+	if existingServiceOrData && !opts.TripleConfirmed {
+		result.BlockingIssues = append(result.BlockingIssues, "existing RustDesk service or data detected; triple confirmation is required")
+		return result, errors.New(result.BlockingIssues[0])
+	}
 	serviceNames := []string{"rustdesk-hbbs", "rustdesk-hbbr"}
 	if opts.LiveVerify {
 		serviceNames = []string{"rustdesk-hbbs-verify", "rustdesk-hbbr-verify"}
 	}
-	preflight := acceptance.Preflight(rt, []string{targetDataDir, defaultInstallDir(rt.OS), filepath.Join(filepath.Dir(targetDataDir), "logs")}, serviceNames, []int{hbbsPort, hbbrPort})
+	preflight := acceptance.Preflight(
+		rt,
+		[]string{targetDataDir, defaultInstallDir(rt.OS), filepath.Join(filepath.Dir(targetDataDir), "logs")},
+		serviceNames,
+		[]int{hbbsPort, hbbrPort},
+		opts.TripleConfirmed,
+	)
 	result.Checks = append(result.Checks, preflight.Checks...)
 	result.Warnings = append(result.Warnings, preflight.Warnings...)
 	if len(preflight.BlockingIssues) > 0 {
@@ -123,12 +157,6 @@ func Run(opts Options) (Result, error) {
 
 	if err := os.MkdirAll(targetDataDir, 0o755); err != nil {
 		return result, fmt.Errorf("cannot create target data dir: %w", err)
-	}
-
-	existingServiceOrData := rt.ExistingService || hasExistingData(targetDataDir)
-	if existingServiceOrData && !opts.TripleConfirmed {
-		result.BlockingIssues = append(result.BlockingIssues, "existing RustDesk service or data detected; triple confirmation is required")
-		return result, errors.New(result.BlockingIssues[0])
 	}
 
 	stagingDir, files, _, err := backupExtract(archivePath)
@@ -165,14 +193,6 @@ func Run(opts Options) (Result, error) {
 	}
 
 	if opts.ValidateOnly {
-		if opts.UserConfirmedLive {
-			if err := markLiveRestoreVerified(archivePath); err != nil {
-				return result, err
-			}
-			result.VerificationLevel = bundle.VerificationLiveRestore
-			result.UserConfirmedLiveRestore = true
-			result.Checks = append(result.Checks, "archive marked as live restore verified")
-		}
 		result.Checks = append(result.Checks, "validate-only mode completed without writing target data")
 		return result, nil
 	}
@@ -262,17 +282,6 @@ func Run(opts Options) (Result, error) {
 		result.ClientValidationTemplates = clientValidationTemplates(result.IsolatedValidationServices)
 		if err := writeLiveVerifyState(restoreBase, archivePath, result.VerificationLevel, false); err != nil {
 			return result, err
-		}
-		if opts.UserConfirmedLive {
-			if err := markLiveRestoreVerified(archivePath); err != nil {
-				return result, err
-			}
-			if err := writeLiveVerifyState(restoreBase, archivePath, bundle.VerificationLiveRestore, true); err != nil {
-				return result, err
-			}
-			result.VerificationLevel = bundle.VerificationLiveRestore
-			result.UserConfirmedLiveRestore = true
-			result.Checks = append(result.Checks, "operator confirmed isolated live restore validation")
 		}
 	}
 
@@ -515,13 +524,38 @@ func ConfirmLiveRestoreVerified(archivePath, verificationDir string) error {
 	if archivePath == "" {
 		return errors.New("archive path is required")
 	}
+	verificationDir = strings.TrimSpace(verificationDir)
+	if verificationDir == "" {
+		return errors.New("verification directory is required")
+	}
+	verificationDir = common.Abs(verificationDir)
+	statePath := filepath.Join(verificationDir, ".rustdesk-friendly-live-verify.json")
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		return fmt.Errorf("verification state not found: %w", err)
+	}
+	var state struct {
+		Archive                  string `json:"archive"`
+		VerificationLevel        string `json:"verification_level"`
+		UserConfirmedLiveRestore bool   `json:"user_confirmed_live_restore"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return fmt.Errorf("verification state is invalid: %w", err)
+	}
+	if common.Abs(strings.TrimSpace(state.Archive)) != archivePath {
+		return errors.New("verification state archive does not match the requested archive")
+	}
+	reportUpdate, err := prepareVerificationReportRefresh(verificationDir, archivePath)
+	if err != nil {
+		return err
+	}
 	if err := markLiveRestoreVerified(archivePath); err != nil {
 		return err
 	}
-	if strings.TrimSpace(verificationDir) != "" {
-		return writeLiveVerifyState(verificationDir, archivePath, bundle.VerificationLiveRestore, true)
+	if err := writeLiveVerifyState(verificationDir, archivePath, bundle.VerificationLiveRestore, true); err != nil {
+		return err
 	}
-	return nil
+	return writePreparedVerificationReport(reportUpdate)
 }
 
 func writeLiveVerifyState(dir, archivePath, level string, confirmed bool) error {
@@ -559,17 +593,34 @@ func writeVerificationReport(result Result, archivePath string) (string, map[str
 	if err != nil {
 		return "", nil, err
 	}
-	payload := map[string]any{
-		"archive":                      archivePath,
-		"target_data_dir":              result.TargetDataDir,
-		"verification_level":           result.VerificationLevel,
-		"user_confirmed_live_restore":  result.UserConfirmedLiveRestore,
-		"isolated_validation_data_dir": result.IsolatedValidationDataDir,
-		"isolated_validation_services": result.IsolatedValidationServices,
-		"verification_instructions":    result.VerificationInstructions,
-		"client_validation_templates":  result.ClientValidationTemplates,
-		"client_template_paths":        templatePaths,
-		"manual_validation_fields": map[string]string{
+	report := buildVerificationReport(result, archivePath, templatePaths)
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return "", nil, err
+	}
+	jsonPath := filepath.Join(baseDir, ".rustdesk-friendly-verification-report.json")
+	if err := os.WriteFile(jsonPath, data, 0o644); err != nil {
+		return "", nil, err
+	}
+	md := buildVerificationMarkdownFromReport(report)
+	if err := os.WriteFile(filepath.Join(baseDir, "rustdesk-friendly-verification-report.md"), []byte(md), 0o644); err != nil {
+		return "", nil, err
+	}
+	return jsonPath, templatePaths, nil
+}
+
+func buildVerificationReport(result Result, archivePath string, templatePaths map[string]string) verificationReport {
+	return verificationReport{
+		Archive:                    archivePath,
+		TargetDataDir:              result.TargetDataDir,
+		VerificationLevel:          result.VerificationLevel,
+		UserConfirmedLiveRestore:   result.UserConfirmedLiveRestore,
+		IsolatedValidationDataDir:  result.IsolatedValidationDataDir,
+		IsolatedValidationServices: result.IsolatedValidationServices,
+		VerificationInstructions:   result.VerificationInstructions,
+		ClientValidationTemplates:  result.ClientValidationTemplates,
+		ClientTemplatePaths:        templatePaths,
+		ManualValidationFields: map[string]string{
 			"operator_name":              "",
 			"validation_started_at":      "",
 			"validation_completed_at":    "",
@@ -583,65 +634,56 @@ func writeVerificationReport(result Result, archivePath string) (string, map[str
 			"rollback_needed":            "",
 			"final_notes":                "",
 		},
-		"checks":          result.Checks,
-		"warnings":        result.Warnings,
-		"blocking_issues": result.BlockingIssues,
-		"restored_files":  result.RestoredFiles,
-		"service_manager": result.ServiceManager,
-		"runtime":         fmt.Sprintf("%s/%s", result.DetectedRuntime.OS, result.DetectedRuntime.Arch),
-		"generated_at":    time.Now().UTC().Format(time.RFC3339),
+		Checks:         result.Checks,
+		Warnings:       result.Warnings,
+		BlockingIssues: result.BlockingIssues,
+		RestoredFiles:  result.RestoredFiles,
+		ServiceManager: result.ServiceManager,
+		Runtime:        fmt.Sprintf("%s/%s", result.DetectedRuntime.OS, result.DetectedRuntime.Arch),
+		GeneratedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
-	data, err := json.MarshalIndent(payload, "", "  ")
-	if err != nil {
-		return "", nil, err
-	}
-	jsonPath := filepath.Join(baseDir, ".rustdesk-friendly-verification-report.json")
-	if err := os.WriteFile(jsonPath, data, 0o644); err != nil {
-		return "", nil, err
-	}
-	md := buildVerificationMarkdown(result, archivePath)
-	if err := os.WriteFile(filepath.Join(baseDir, "rustdesk-friendly-verification-report.md"), []byte(md), 0o644); err != nil {
-		return "", nil, err
-	}
-	return jsonPath, templatePaths, nil
 }
 
-func buildVerificationMarkdown(result Result, archivePath string) string {
+func buildVerificationMarkdownFromReport(report verificationReport) string {
+	return buildVerificationMarkdownFromReportWithManualSection(report, "")
+}
+
+func buildVerificationMarkdownFromReportWithManualSection(report verificationReport, manualSection string) string {
 	lines := []string{
 		"# RustDesk Friendly Verification Report",
 		"",
-		fmt.Sprintf("- Archive: `%s`", archivePath),
-		fmt.Sprintf("- Runtime: `%s/%s`", result.DetectedRuntime.OS, result.DetectedRuntime.Arch),
-		fmt.Sprintf("- Verification Level: `%s`", result.VerificationLevel),
-		fmt.Sprintf("- User Confirmed Live Restore: `%t`", result.UserConfirmedLiveRestore),
-		fmt.Sprintf("- Target Data Dir: `%s`", result.TargetDataDir),
+		fmt.Sprintf("- Archive: `%s`", report.Archive),
+		fmt.Sprintf("- Runtime: `%s`", report.Runtime),
+		fmt.Sprintf("- Verification Level: `%s`", report.VerificationLevel),
+		fmt.Sprintf("- User Confirmed Live Restore: `%t`", report.UserConfirmedLiveRestore),
+		fmt.Sprintf("- Target Data Dir: `%s`", report.TargetDataDir),
 	}
-	if result.IsolatedValidationDataDir != "" {
-		lines = append(lines, fmt.Sprintf("- Isolated Validation Dir: `%s`", result.IsolatedValidationDataDir))
+	if report.IsolatedValidationDataDir != "" {
+		lines = append(lines, fmt.Sprintf("- Isolated Validation Dir: `%s`", report.IsolatedValidationDataDir))
 	}
-	if len(result.IsolatedValidationServices) > 0 {
-		lines = append(lines, fmt.Sprintf("- Isolated Services: `%s`", strings.Join(result.IsolatedValidationServices, "`, `")))
+	if len(report.IsolatedValidationServices) > 0 {
+		lines = append(lines, fmt.Sprintf("- Isolated Services: `%s`", strings.Join(report.IsolatedValidationServices, "`, `")))
 	}
 	lines = append(lines, "", "## Checks")
-	for _, check := range result.Checks {
+	for _, check := range report.Checks {
 		lines = append(lines, "- "+check)
 	}
-	if len(result.Warnings) > 0 {
+	if len(report.Warnings) > 0 {
 		lines = append(lines, "", "## Warnings")
-		for _, warning := range result.Warnings {
+		for _, warning := range report.Warnings {
 			lines = append(lines, "- "+warning)
 		}
 	}
-	if len(result.VerificationInstructions) > 0 {
+	if len(report.VerificationInstructions) > 0 {
 		lines = append(lines, "", "## Verification Instructions")
-		for _, step := range result.VerificationInstructions {
+		for _, step := range report.VerificationInstructions {
 			lines = append(lines, "- "+step)
 		}
 	}
-	if len(result.ClientValidationTemplates) > 0 {
+	if len(report.ClientValidationTemplates) > 0 {
 		lines = append(lines, "", "## Client Validation Templates")
 		for _, clientOS := range []string{"windows", "linux", "macos"} {
-			steps := result.ClientValidationTemplates[clientOS]
+			steps := report.ClientValidationTemplates[clientOS]
 			if len(steps) == 0 {
 				continue
 			}
@@ -649,13 +691,89 @@ func buildVerificationMarkdown(result Result, archivePath string) string {
 			for _, step := range steps {
 				lines = append(lines, "- "+step)
 			}
-			if path := result.ClientTemplatePaths[clientOS]; strings.TrimSpace(path) != "" {
+			if path := report.ClientTemplatePaths[clientOS]; strings.TrimSpace(path) != "" {
 				lines = append(lines, "- Template File: `"+path+"`")
 			}
 		}
 	}
-	lines = append(lines,
-		"",
+	lines = append(lines, "")
+	lines = append(lines, manualValidationSection(manualSection)...)
+	return strings.Join(lines, "\n") + "\n"
+}
+
+type preparedVerificationReport struct {
+	reportPath string
+	reportJSON []byte
+	mdPath     string
+	reportMD   []byte
+}
+
+func prepareVerificationReportRefresh(baseDir, archivePath string) (preparedVerificationReport, error) {
+	reportPath := filepath.Join(baseDir, ".rustdesk-friendly-verification-report.json")
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		return preparedVerificationReport{}, fmt.Errorf("verification report not found: %w", err)
+	}
+	var report verificationReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		return preparedVerificationReport{}, fmt.Errorf("verification report is invalid: %w", err)
+	}
+	report.Archive = archivePath
+	report.VerificationLevel = bundle.VerificationLiveRestore
+	report.UserConfirmedLiveRestore = true
+	report.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
+	if report.ManualValidationFields == nil {
+		report.ManualValidationFields = map[string]string{}
+	}
+	updated, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return preparedVerificationReport{}, err
+	}
+	mdPath := filepath.Join(baseDir, "rustdesk-friendly-verification-report.md")
+	manualSection, err := readExistingManualValidationSection(mdPath)
+	if err != nil {
+		return preparedVerificationReport{}, err
+	}
+	return preparedVerificationReport{
+		reportPath: reportPath,
+		reportJSON: updated,
+		mdPath:     mdPath,
+		reportMD:   []byte(buildVerificationMarkdownFromReportWithManualSection(report, manualSection)),
+	}, nil
+}
+
+func writePreparedVerificationReport(prepared preparedVerificationReport) error {
+	if err := os.WriteFile(prepared.reportPath, prepared.reportJSON, 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(prepared.mdPath, prepared.reportMD, 0o644)
+}
+
+func readExistingManualValidationSection(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	return extractManualValidationSection(string(data)), nil
+}
+
+func extractManualValidationSection(content string) string {
+	const marker = "## Manual Validation Record"
+	idx := strings.Index(content, marker)
+	if idx == -1 {
+		return ""
+	}
+	return strings.TrimRight(content[idx:], "\n")
+}
+
+func manualValidationSection(existing string) []string {
+	if strings.TrimSpace(existing) != "" {
+		return strings.Split(existing, "\n")
+	}
+	return []string{
 		"## Manual Validation Record",
 		"- Operator Name: ",
 		"- Validation Started At: ",
@@ -669,8 +787,7 @@ func buildVerificationMarkdown(result Result, archivePath string) string {
 		"- Test Session Result: ",
 		"- Rollback Needed: ",
 		"- Final Notes: ",
-	)
-	return strings.Join(lines, "\n") + "\n"
+	}
 }
 
 func verificationInstructions(rt runtimeinfo.Runtime, archivePath, dataDir string, serviceNames []string) []string {

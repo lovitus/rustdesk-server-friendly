@@ -24,6 +24,9 @@ type Result struct {
 func Run(out io.Writer) Result {
 	rt := runtimeinfo.Detect("")
 	res := Result{Runtime: rt}
+	validateRuntime := rt
+	validateServiceNames := []string{}
+	validatePorts := []int{}
 	if rt.Supported {
 		res.Checks = append(res.Checks, fmt.Sprintf("runtime %s/%s is within the support matrix", rt.OS, rt.Arch))
 	} else {
@@ -45,7 +48,13 @@ func Run(out io.Writer) Result {
 	installDir := chooseInstallDir(rt)
 	dataDir := chooseDataDir(rt)
 	logDir := chooseLogDir(rt)
-	preflight := acceptance.Preflight(rt, []string{installDir, dataDir, logDir}, []string{"rustdesk-hbbs", "rustdesk-hbbr"}, []int{21116, 21117})
+	preflight := acceptance.Preflight(
+		rt,
+		[]string{installDir, dataDir, logDir},
+		[]string{"rustdesk-hbbs", "rustdesk-hbbr"},
+		[]int{21116, 21117},
+		true,
+	)
 	res.Checks = append(res.Checks, preflight.Checks...)
 	res.Warnings = append(res.Warnings, preflight.Warnings...)
 	res.BlockingIssues = append(res.BlockingIssues, preflight.BlockingIssues...)
@@ -59,52 +68,60 @@ func Run(out io.Writer) Result {
 			}
 		}
 		if rt.ManagedService && rt.OS != "darwin" {
-			svcRes, err := service.Apply(service.Config{
-				OS:          rt.OS,
-				ServiceName: "rustdesk",
-				DataDir:     dataDir,
-				InstallDir:  installDir,
-				LogDir:      logDir,
-				RelayHost:   "127.0.0.1",
-				HBBSPort:    21116,
-				HBBRPort:    21117,
-			})
-			if err != nil {
-				res.BlockingIssues = append(res.BlockingIssues, "service repair failed: "+err.Error())
+			if shouldSkipManagedServiceRepair(rt) {
+				res.Warnings = append(res.Warnings, "managed service repair skipped on Linux because existing RustDesk units were detected; diagnose remains non-disruptive")
+				validateServiceNames, validatePorts = defaultManagedServiceValidationTargets()
 			} else {
-				res.Actions = append(res.Actions, "repaired managed service definitions")
-				res.Checks = append(res.Checks, svcRes.Checks...)
-				res.Warnings = append(res.Warnings, svcRes.Warnings...)
-				logRes, err := logpolicy.Apply(logpolicy.Config{
-					OS:             rt.OS,
-					ServiceManager: svcRes.Manager,
-					LogDir:         logDir,
-					ServiceNames:   svcRes.ServiceNames,
+				svcRes, err := service.Apply(service.Config{
+					OS:          rt.OS,
+					ServiceName: "rustdesk",
+					DataDir:     dataDir,
+					InstallDir:  installDir,
+					LogDir:      logDir,
+					RelayHost:   "127.0.0.1",
+					HBBSPort:    21116,
+					HBBRPort:    21117,
 				})
 				if err != nil {
-					res.BlockingIssues = append(res.BlockingIssues, "log policy repair failed: "+err.Error())
+					res.BlockingIssues = append(res.BlockingIssues, "service repair failed: "+err.Error())
 				} else {
-					res.Actions = append(res.Actions, "applied log retention policy")
-					res.Checks = append(res.Checks, logRes.Checks...)
-					res.Warnings = append(res.Warnings, logRes.Warnings...)
-					validateRuntime := rt
+					res.Actions = append(res.Actions, "repaired managed service definitions")
+					res.Checks = append(res.Checks, svcRes.Checks...)
+					res.Warnings = append(res.Warnings, svcRes.Warnings...)
 					if svcRes.Manager != "" {
 						validateRuntime.ServiceManager = svcRes.Manager
 					}
-					validate := acceptance.Validate(acceptance.Options{
-						Runtime:      validateRuntime,
-						InstallDir:   installDir,
-						DataDir:      dataDir,
-						LogDir:       logDir,
-						ServiceNames: svcRes.ServiceNames,
-						Ports:        []int{svcRes.HBBSPort, svcRes.HBBRPort},
-						RequireData:  dataDir != "",
+					validateServiceNames = svcRes.ServiceNames
+					validatePorts = []int{svcRes.HBBSPort, svcRes.HBBRPort}
+					logRes, err := logpolicy.Apply(logpolicy.Config{
+						OS:             rt.OS,
+						ServiceManager: svcRes.Manager,
+						LogDir:         logDir,
+						ServiceNames:   svcRes.ServiceNames,
 					})
-					res.Checks = append(res.Checks, validate.Checks...)
-					res.Warnings = append(res.Warnings, validate.Warnings...)
-					res.BlockingIssues = append(res.BlockingIssues, validate.BlockingIssues...)
+					if err != nil {
+						res.BlockingIssues = append(res.BlockingIssues, "log policy repair failed: "+err.Error())
+					} else {
+						res.Actions = append(res.Actions, "applied log retention policy")
+						res.Checks = append(res.Checks, logRes.Checks...)
+						res.Warnings = append(res.Warnings, logRes.Warnings...)
+					}
 				}
 			}
+		}
+		if len(validateServiceNames) > 0 || len(validatePorts) > 0 {
+			validate := acceptance.Validate(acceptance.Options{
+				Runtime:      validateRuntime,
+				InstallDir:   installDir,
+				DataDir:      dataDir,
+				LogDir:       logDir,
+				ServiceNames: validateServiceNames,
+				Ports:        validatePorts,
+				RequireData:  dataDir != "",
+			})
+			res.Checks = append(res.Checks, validate.Checks...)
+			res.Warnings = append(res.Warnings, validate.Warnings...)
+			res.BlockingIssues = append(res.BlockingIssues, validate.BlockingIssues...)
 		}
 	}
 	if out != nil {
@@ -123,6 +140,14 @@ func Run(out io.Writer) Result {
 		}
 	}
 	return res
+}
+
+func shouldSkipManagedServiceRepair(rt runtimeinfo.Runtime) bool {
+	return rt.OS == "linux" && rt.ExistingService
+}
+
+func defaultManagedServiceValidationTargets() ([]string, []int) {
+	return []string{"rustdesk-hbbs", "rustdesk-hbbr"}, []int{21116, 21117}
 }
 
 func chooseInstallDir(rt runtimeinfo.Runtime) string {
