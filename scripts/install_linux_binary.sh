@@ -6,6 +6,36 @@ OWNER_REPO="lovitus/rustdesk-server-friendly"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 DOWNLOAD_TOOL="${DOWNLOAD_TOOL:-auto}"  # auto|curl|wget
 
+run_install() {
+  if [ "$(id -u)" -eq 0 ]; then
+    install "$@"
+    return
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo install "$@"
+    return
+  fi
+  install "$@"
+}
+
+ensure_install_dir() {
+  if [ -d "$INSTALL_DIR" ]; then
+    return
+  fi
+  if [ "$(id -u)" -eq 0 ]; then
+    mkdir -p "$INSTALL_DIR"
+    return
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo mkdir -p "$INSTALL_DIR"
+    return
+  fi
+  mkdir -p "$INSTALL_DIR" 2>/dev/null || {
+    echo "[STOP] cannot create $INSTALL_DIR. Re-run as root, install sudo, or set INSTALL_DIR to a writable directory."
+    exit 1
+  }
+}
+
 choose_tool() {
   case "$DOWNLOAD_TOOL" in
     curl|wget) echo "$DOWNLOAD_TOOL" ;;
@@ -54,8 +84,21 @@ TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 fetch "$URL" "$TMP"
 
-sudo install -d "$INSTALL_DIR"
-sudo install -m 0755 "$TMP" "$INSTALL_DIR/rustdesk-friendly"
+ensure_install_dir
+run_install -d "$INSTALL_DIR"
+run_install -m 0755 "$TMP" "$INSTALL_DIR/rustdesk-friendly"
 
-rustdesk-friendly version || true
 echo "[OK] installed to $INSTALL_DIR/rustdesk-friendly"
+"$INSTALL_DIR/rustdesk-friendly" version || true
+
+case ":$PATH:" in
+  *":$INSTALL_DIR:"*)
+    echo "[OK] run now: rustdesk-friendly"
+    ;;
+  *)
+    echo "[WARN] $INSTALL_DIR is not on your current PATH"
+    echo "[OK] run now with full path: $INSTALL_DIR/rustdesk-friendly"
+    echo "[OK] or add it to PATH, for example:"
+    echo "export PATH=\"$INSTALL_DIR:\$PATH\""
+    ;;
+esac

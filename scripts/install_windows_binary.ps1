@@ -7,6 +7,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $OwnerRepo = "lovitus/rustdesk-server-friendly"
+$ApiUrl = "https://api.github.com/repos/$OwnerRepo/releases/latest"
 
 switch -Regex ($env:PROCESSOR_ARCHITECTURE) {
     "ARM64" { $Asset = "rustdesk-friendly-windows-arm64.exe" }
@@ -17,8 +18,42 @@ function Test-Command([string]$Name) {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function Ensure-GitHubCli {
+    if (Test-Command "gh") {
+        return
+    }
+    if (Test-Command "winget") {
+        winget install GitHub.cli --accept-source-agreements --accept-package-agreements
+        $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        $MachinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+        $CombinedPath = @($env:Path, $UserPath, $MachinePath) -join ';'
+        $env:Path = ($CombinedPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique) -join ';'
+    }
+    if (-not (Test-Command "gh")) {
+        throw "gh not found and winget could not install it"
+    }
+}
+
+function Get-LatestTag {
+    try {
+        return (Invoke-RestMethod $ApiUrl).tag_name
+    } catch {
+        if (Test-Command "curl.exe") {
+            $json = & curl.exe -fsSL $ApiUrl
+            if (-not [string]::IsNullOrWhiteSpace($json)) {
+                $match = [regex]::Match($json, '"tag_name"\s*:\s*"([^"]+)"')
+                if ($match.Success -and -not [string]::IsNullOrWhiteSpace($match.Groups[1].Value)) {
+                    return $match.Groups[1].Value
+                }
+            }
+        }
+        Ensure-GitHubCli
+        return (gh release view --repo $OwnerRepo --json tagName --jq .tagName)
+    }
+}
+
 if ($Version -eq "latest") {
-    $Tag = (Invoke-RestMethod "https://api.github.com/repos/$OwnerRepo/releases/latest").tag_name
+    $Tag = Get-LatestTag
 } else {
     $Tag = $Version
 }
@@ -36,13 +71,7 @@ switch ($DownloadMethod.ToLower()) {
         & curl.exe -fL $Url -o $TempExe
     }
     "gh" {
-        if (-not (Test-Command "gh")) {
-            if (Test-Command "winget") {
-                winget install GitHub.cli --accept-source-agreements --accept-package-agreements
-            } else {
-                throw "gh not found and winget unavailable"
-            }
-        }
+        Ensure-GitHubCli
         gh release download $Tag --repo $OwnerRepo --pattern $Asset --output $TempExe --clobber
     }
     default {
@@ -101,6 +130,9 @@ Write-Host ""
 Write-Host "Try now in this PowerShell:"
 Write-Host "rustdesk-friendly"
 Write-Host "rustdesk-friendly apply backup --source windows"
+Write-Host "& `"$Target`" version"
 Write-Host ""
 Write-Host "If command is still not found, open a new terminal and run:"
 Write-Host "rustdesk-friendly"
+Write-Host "Or use the full path:"
+Write-Host "& `"$Target`""

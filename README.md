@@ -45,11 +45,22 @@ bash <(curl -fsSL https://raw.githubusercontent.com/lovitus/rustdesk-server-frie
 rustdesk-friendly
 ```
 
+If `rustdesk-friendly` is still not found immediately after install, the script will print the exact full path to run.
+This is expected when `INSTALL_DIR` is not already in your current shell `PATH`.
+
 ### Windows PowerShell
 
 ```powershell
 iwr -useb https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_windows_binary.ps1 | iex
 rustdesk-friendly
+```
+
+If your environment cannot resolve the latest release automatically, run the installer with an explicit version:
+
+```powershell
+$script = Join-Path $env:TEMP "install_rustdesk_server_friendly.ps1"
+iwr -UseBasicParsing https://raw.githubusercontent.com/lovitus/rustdesk-server-friendly/main/scripts/install_windows_binary.ps1 -OutFile $script
+powershell -ExecutionPolicy Bypass -File $script -Version v1.3.2
 ```
 
 ## Main Flows
